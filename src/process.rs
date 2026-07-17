@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct CmdOutput {
@@ -11,7 +11,7 @@ pub struct CmdOutput {
 
 pub trait CommandRunner {
     fn run(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<CmdOutput>;
-    fn spawn(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<()>;
+    fn run_inherit(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<i32>;
 }
 
 #[derive(Debug, Default)]
@@ -32,17 +32,13 @@ impl CommandRunner for RealCommandRunner {
         })
     }
 
-    fn spawn(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<()> {
+    fn run_inherit(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<i32> {
         let mut cmd = Command::new(program);
         cmd.args(args.iter().map(OsStr::new));
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
-        cmd.spawn()?;
-        Ok(())
+        Ok(cmd.status()?.code().unwrap_or(1))
     }
 }
 
@@ -50,4 +46,3 @@ pub fn split_program(argv: &[String]) -> Option<(&str, Vec<String>)> {
     argv.split_first()
         .map(|(program, args)| (program.as_str(), args.to_vec()))
 }
-

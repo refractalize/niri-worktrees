@@ -90,6 +90,7 @@ pub fn branch_names(
         .stdout
         .lines()
         .filter(|branch| !branch.ends_with("/HEAD"))
+        .filter(|branch| !remote || branch.contains('/'))
         .map(ToOwned::to_owned)
         .collect())
 }
@@ -180,28 +181,52 @@ pub fn default_origin_branch(runner: &dyn CommandRunner, repo: &Path) -> Result<
     message(format!("Could not determine origin default branch for {}", repo.display()))
 }
 
-pub fn create_worktree(
+pub fn create_branch_worktree(
     runner: &dyn CommandRunner,
     repo: &Path,
-    branch: &str,
-    local_branch: &str,
+    new_branch: &str,
+    from_branch: &str,
     worktree: &Path,
 ) -> Result<()> {
-    let mut args = vec![
+    let args = vec![
         "-C".to_string(),
         repo.display().to_string(),
         "worktree".to_string(),
         "add".to_string(),
         worktree.display().to_string(),
+        "-b".to_string(),
+        new_branch.to_string(),
+        from_branch.to_string(),
     ];
-    if local_branch_exists(runner, repo, local_branch) {
-        args.push(local_branch.to_string());
-    } else if branch.contains('/') {
-        args.extend(["-b".to_string(), local_branch.to_string(), branch.to_string()]);
-    } else {
-        args.push(branch.to_string());
+    let out = runner
+        .run("git", &args, None)
+        .map_err(|e| AppError::Message(format!("git was not found or failed to start: {e}")))?;
+    if out.status != 0 {
+        return message(format!(
+            "Could not create worktree {} for {} from {}{}",
+            worktree.display(),
+            new_branch,
+            from_branch,
+            suffix_stderr(&out.stderr)
+        ));
     }
+    Ok(())
+}
 
+pub fn create_existing_branch_worktree(
+    runner: &dyn CommandRunner,
+    repo: &Path,
+    branch: &str,
+    worktree: &Path,
+) -> Result<()> {
+    let args = vec![
+        "-C".to_string(),
+        repo.display().to_string(),
+        "worktree".to_string(),
+        "add".to_string(),
+        worktree.display().to_string(),
+        branch.to_string(),
+    ];
     let out = runner
         .run("git", &args, None)
         .map_err(|e| AppError::Message(format!("git was not found or failed to start: {e}")))?;
@@ -315,5 +340,15 @@ mod tests {
         assert_eq!(rows[1].local_branch.as_deref(), Some("feat"));
         assert_eq!(rows[1].remote_branch.as_deref(), Some("origin/feat"));
     }
-}
 
+    #[test]
+    fn remote_branch_filter_requires_branch_name() {
+        let branches = ["origin", "origin/HEAD", "origin/main", "upstream/topic"];
+        let filtered: Vec<&str> = branches
+            .into_iter()
+            .filter(|branch| !branch.ends_with("/HEAD"))
+            .filter(|branch| branch.contains('/'))
+            .collect();
+        assert_eq!(filtered, ["origin/main", "upstream/topic"]);
+    }
+}

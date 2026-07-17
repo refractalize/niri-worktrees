@@ -19,9 +19,9 @@ pub struct Repo {
     #[serde(default)]
     pub bare: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub setup: Option<String>,
+    pub setup: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub teardown: Option<String>,
+    pub teardown: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -78,4 +78,3 @@ pub struct PullRequest {
     pub pr_number: Option<u64>,
     pub status: Option<String>,
 }
-

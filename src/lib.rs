@@ -1,6 +1,5 @@
 pub mod cli;
 pub mod commands;
-pub mod config;
 pub mod errors;
 pub mod git;
 pub mod github;
@@ -29,4 +28,3 @@ pub fn run() -> i32 {
         }
     }
 }
-

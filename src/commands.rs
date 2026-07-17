@@ -1,5 +1,4 @@
 use crate::cli;
-use crate::config::Config;
 use crate::errors::{message, AppError, CommandError, Result};
 use crate::git;
 use crate::github;
@@ -56,15 +55,17 @@ pub fn dispatch(command: cli::Command, env: &dyn Env) -> Result<()> {
         cli::Command::ListPullRequests(args) => cmd_list_pull_requests(args, env),
         cli::Command::SetWorkspace(args) => cmd_set_workspace(args, env),
         cli::Command::UnsetWorkspace(args) => cmd_unset_workspace(args, env),
+        cli::Command::GetWorktree(args) => cmd_get_worktree(args, env),
         cli::Command::FocusWorktree(args) => {
             focus_worktree(env, normalize_path(args.worktree))?;
             Ok(())
         }
-        cli::Command::FocusBranch(args) => cmd_focus_branch(args, env),
+        cli::Command::CreateWorktree(args) => cmd_create_worktree(args, env),
         cli::Command::CreateBranch(args) => cmd_create_branch(args, env),
         cli::Command::RemoveWorktree(args) => cmd_remove_worktree(args, env),
-        cli::Command::OpenTerminal(args) => cmd_open_terminal(args, env),
         cli::Command::SetRepo(args) => cmd_set_repo(args, env),
+        cli::Command::SetRepoSetup(args) => cmd_set_repo_command(args, env, RepoCommandKind::Setup),
+        cli::Command::SetRepoTeardown(args) => cmd_set_repo_command(args, env, RepoCommandKind::Teardown),
         cli::Command::RemoveRepo(args) => cmd_remove_repo(args, env),
         cli::Command::ListRepos(args) => cmd_list_repos(args, env),
     }
@@ -153,34 +154,40 @@ fn cmd_unset_workspace(args: cli::UnsetWorkspace, env: &dyn Env) -> Result<()> {
     store::unset_worktree_mapping(env.store(), worktree.as_deref(), args.workspace_id)
 }
 
-fn cmd_focus_branch(args: cli::FocusBranch, env: &dyn Env) -> Result<()> {
-    let repo_path = repo_arg_or_default(env.runner(), args.repo.as_deref())?;
+fn cmd_get_worktree(args: cli::GetWorktree, env: &dyn Env) -> Result<()> {
+    let workspace_id = if let Some(id) = args.workspace_id {
+        id
+    } else {
+        niri::focused_workspace(env.niri())?
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| AppError::Message("Focused Niri workspace does not have an id".to_string()))?
+    };
+    let Some(mapping) = env
+        .store()
+        .load_worktrees()?
+        .into_iter()
+        .find(|entry| entry.workspace_id == workspace_id && entry.path.is_dir())
+    else {
+        return message(format!("No worktree is stored for workspace {workspace_id}"));
+    };
+    println!("{}", mapping.path.display());
+    Ok(())
+}
+
+fn cmd_create_worktree(args: cli::CreateWorktree, env: &dyn Env) -> Result<()> {
+    let repo_path = normalize_path(args.repo);
     let repo = stored_repo_for_path(env.store(), &repo_path)?
         .ok_or_else(|| AppError::Message(format!("No repo is stored for {}", repo_path.display())))?;
-    let local_branch = branch_pr_name(&args.branch);
-    let worktrees = git::worktree_branches(env.runner(), &repo_path)?;
-    let mut created = false;
-    let worktree = if let Some((path, _)) = worktrees.get(&local_branch) {
-        path.clone()
-    } else {
-        if !args.add_worktree {
-            return message(format!(
-                "No worktree exists for branch {local_branch}; pass --add-worktree to create it"
-            ));
-        }
-        let path = worktree_path_for_repo_branch(&repo, &local_branch);
-        if path.exists() {
-            return message(format!("Cannot create worktree because {} already exists", path.display()));
-        }
-        git::create_worktree(env.runner(), &repo_path, &args.branch, &local_branch, &path)?;
-        created = true;
-        path
-    };
-    focus_worktree(env, worktree.clone())?;
-    if created {
-        run_setup_terminal(env.runner(), &repo, &worktree)?;
+    if !git::local_branch_exists(env.runner(), &repo_path, &args.branch) {
+        return message(format!("Local branch {} does not exist", args.branch));
     }
-    Ok(())
+    let worktree = worktree_path_for_repo_branch(&repo, &args.branch);
+    if worktree.exists() {
+        return message(format!("Cannot create worktree because {} already exists", worktree.display()));
+    }
+    git::create_existing_branch_worktree(env.runner(), &repo_path, &args.branch, &worktree)?;
+    focus_worktree(env, worktree)
 }
 
 fn cmd_create_branch(args: cli::CreateBranch, env: &dyn Env) -> Result<()> {
@@ -197,39 +204,24 @@ fn cmd_create_branch(args: cli::CreateBranch, env: &dyn Env) -> Result<()> {
     if worktree.exists() {
         return message(format!("Cannot create worktree because {} already exists", worktree.display()));
     }
-    let origin = git::default_origin_branch(env.runner(), &repo_path)?;
-    git::create_worktree(env.runner(), &repo_path, &origin, &args.branch, &worktree)?;
+    let from_branch = match args.from_branch {
+        Some(branch) => branch,
+        None => git::default_origin_branch(env.runner(), &repo_path)?,
+    };
+    git::create_branch_worktree(
+        env.runner(),
+        &repo_path,
+        &args.branch,
+        &from_branch,
+        &worktree,
+    )?;
     git::unset_current_branch_upstream(env.runner(), &worktree)?;
     focus_worktree(env, worktree.clone())?;
-    run_setup_terminal(env.runner(), &repo, &worktree)
+    run_setup(env.runner(), &repo, &worktree)
 }
 
 fn cmd_remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> Result<()> {
     remove_worktree(args, env).map_err(AppError::Command)
-}
-
-fn cmd_open_terminal(args: cli::OpenTerminal, env: &dyn Env) -> Result<()> {
-    let cfg = Config::load()?;
-    let mut argv = cfg.terminal_argv()?;
-    argv.extend(command_args_after_separator(args.command));
-    let workspace = if let Some(id) = args.workspace_id {
-        niri::focus_workspace(env.niri(), id)?
-    } else {
-        niri::focused_workspace(env.niri())?
-    };
-    let workspace_id = workspace
-        .get("id")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| AppError::Message("Current Niri workspace does not have an id".to_string()))?;
-    let cwd = worktree_path_for_workspace(env.store(), workspace_id)?.unwrap_or_else(|| {
-        crate::paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
-    });
-    let Some((program, rest)) = split_program(&argv) else {
-        return message("terminal-command is empty");
-    };
-    env.runner()
-        .spawn(program, &rest, Some(&cwd))
-        .map_err(|e| AppError::Message(format!("Could not start terminal: {e}")))
 }
 
 fn cmd_set_repo(args: cli::SetRepo, env: &dyn Env) -> Result<()> {
@@ -239,12 +231,6 @@ fn cmd_set_repo(args: cli::SetRepo, env: &dyn Env) -> Result<()> {
     }
     let mut repos = env.store().load_repos()?;
     if let Some(repo) = repos.iter_mut().find(|repo| repo.path == repo_path) {
-        if args.setup.is_some() {
-            repo.setup = args.setup;
-        }
-        if args.teardown.is_some() {
-            repo.teardown = args.teardown;
-        }
         if let Some(bare) = args.bare {
             repo.bare = bool::from(bare);
         }
@@ -252,9 +238,28 @@ fn cmd_set_repo(args: cli::SetRepo, env: &dyn Env) -> Result<()> {
         repos.push(Repo {
             path: repo_path,
             bare: args.bare.map(bool::from).unwrap_or(false),
-            setup: args.setup,
-            teardown: args.teardown,
+            setup: None,
+            teardown: None,
         });
+    }
+    env.store().save_repos(&repos)
+}
+
+enum RepoCommandKind {
+    Setup,
+    Teardown,
+}
+
+fn cmd_set_repo_command(args: cli::SetRepoCommand, env: &dyn Env, kind: RepoCommandKind) -> Result<()> {
+    let repo_path = normalize_path(args.repo);
+    let mut repos = env.store().load_repos()?;
+    let Some(repo) = repos.iter_mut().find(|repo| repo.path == repo_path) else {
+        return message(format!("No repo is stored for {}", repo_path.display()));
+    };
+    let command = (!args.command.is_empty()).then_some(args.command);
+    match kind {
+        RepoCommandKind::Setup => repo.setup = command,
+        RepoCommandKind::Teardown => repo.teardown = command,
     }
     env.store().save_repos(&repos)
 }
@@ -583,14 +588,6 @@ fn focus_worktree(env: &dyn Env, worktree: PathBuf) -> Result<()> {
     store::set_worktree_mapping(env.store(), worktree, workspace_id)
 }
 
-fn worktree_path_for_workspace(store: &dyn Store, workspace_id: u64) -> Result<Option<PathBuf>> {
-    Ok(store
-        .load_worktrees()?
-        .into_iter()
-        .find(|entry| entry.workspace_id == workspace_id && entry.path.is_dir())
-        .map(|entry| entry.path))
-}
-
 fn worktree_path_for_repo_branch(repo: &Repo, branch: &str) -> PathBuf {
     let base = if repo.bare {
         repo.path.clone()
@@ -656,7 +653,7 @@ fn remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> std::result::Res
             .details(json!({"worktree": entry.path, "workspace_id": entry.workspace_id}))
             .json(args.json)
         })?;
-    run_teardown_terminal(env.runner(), &repo, &entry.path).map_err(|mut err| {
+    run_teardown(env.runner(), &repo, &entry.path).map_err(|mut err| {
         err.json = args.json;
         err
     })?;
@@ -729,60 +726,56 @@ fn ensure_worktree_clean(
     }
 }
 
-fn run_setup_terminal(runner: &dyn CommandRunner, repo: &Repo, worktree: &Path) -> Result<()> {
-    let Some(setup) = repo.setup.as_deref().filter(|s| !s.is_empty()) else {
+fn run_setup(runner: &dyn CommandRunner, repo: &Repo, worktree: &Path) -> Result<()> {
+    let Some(setup) = repo.setup.as_deref().filter(|command| !command.is_empty()) else {
         return Ok(());
     };
-    let mut argv = Config::load()?.terminal_argv()?;
-    argv.extend(shlex::split(setup).ok_or_else(|| AppError::Message("Could not parse setup command".to_string()))?);
-    let Some((program, rest)) = split_program(&argv) else {
-        return message("terminal-command is empty");
+    let Some((program, rest)) = split_program(setup) else {
+        return message("Setup command is empty");
     };
-    runner
-        .spawn(program, &rest, Some(worktree))
-        .map_err(|e| AppError::Message(format!("Could not start setup terminal: {e}")))
-}
-
-fn run_teardown_terminal(
-    runner: &dyn CommandRunner,
-    repo: &Repo,
-    worktree: &Path,
-) -> std::result::Result<(), CommandError> {
-    let Some(teardown) = repo.teardown.as_deref().filter(|s| !s.is_empty()) else {
-        return Ok(());
-    };
-    let cfg = Config::load().map_err(command_from_app)?;
-    let mut argv = cfg.terminal_argv().map_err(command_from_app)?;
-    let teardown_args = shlex::split(teardown)
-        .ok_or_else(|| command_from_app(AppError::Message("Could not parse teardown command".to_string())))?;
-    argv.extend(teardown_args);
-    let Some((program, rest)) = split_program(&argv) else {
-        return Err(CommandError::new("teardown_failed", "terminal-command is empty")
-            .exit_code(12)
-            .details(json!({"worktree": worktree})));
-    };
-    let out = runner.run(program, &rest, Some(worktree)).map_err(|e| {
-        CommandError::new("teardown_failed", format!("Could not run teardown command: {e}"))
-            .exit_code(12)
-            .details(json!({"worktree": worktree}))
-    })?;
-    if out.status != 0 {
-        return Err(CommandError::new(
-            "teardown_failed",
-            format!("Teardown command failed with exit code {}", out.status),
-        )
-        .exit_code(12)
-        .details(json!({"worktree": worktree, "exit_code": out.status})));
+    let exit_code = runner
+        .run_inherit(program, &rest, Some(worktree))
+        .map_err(|e| AppError::Message(format!("Could not run setup command: {e}")))?;
+    if exit_code != 0 {
+        return Err(AppError::Command(
+            CommandError::new(
+                "setup_failed",
+                format!("Setup command failed with exit code {exit_code}"),
+            )
+            .exit_code(14)
+            .details(json!({"worktree": worktree, "exit_code": exit_code})),
+        ));
     }
     Ok(())
 }
 
-fn command_args_after_separator(args: Vec<String>) -> Vec<String> {
-    if args.first().map(String::as_str) == Some("--") {
-        args.into_iter().skip(1).collect()
-    } else {
-        args
+fn run_teardown(
+    runner: &dyn CommandRunner,
+    repo: &Repo,
+    worktree: &Path,
+) -> std::result::Result<(), CommandError> {
+    let Some(teardown) = repo.teardown.as_deref().filter(|command| !command.is_empty()) else {
+        return Ok(());
+    };
+    let Some((program, rest)) = split_program(teardown) else {
+        return Err(CommandError::new("teardown_failed", "Teardown command is empty")
+            .exit_code(12)
+            .details(json!({"worktree": worktree})));
+    };
+    let exit_code = runner.run_inherit(program, &rest, Some(worktree)).map_err(|e| {
+        CommandError::new("teardown_failed", format!("Could not run teardown command: {e}"))
+            .exit_code(12)
+            .details(json!({"worktree": worktree}))
+    })?;
+    if exit_code != 0 {
+        return Err(CommandError::new(
+            "teardown_failed",
+            format!("Teardown command failed with exit code {exit_code}"),
+        )
+        .exit_code(12)
+        .details(json!({"worktree": worktree, "exit_code": exit_code})));
     }
+    Ok(())
 }
 
 fn command_from_app(err: AppError) -> CommandError {
@@ -798,13 +791,4 @@ mod tests {
         assert_eq!(branch_pr_name("origin/feature"), "feature");
         assert_eq!(branch_pr_name("feature"), "feature");
     }
-
-    #[test]
-    fn command_args_strip_separator() {
-        assert_eq!(
-            command_args_after_separator(vec!["--".into(), "nvim".into()]),
-            vec!["nvim"]
-        );
-    }
 }
-

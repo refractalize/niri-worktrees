@@ -15,12 +15,14 @@ pub enum Command {
     ListPullRequests(ListPullRequests),
     SetWorkspace(SetWorkspace),
     UnsetWorkspace(UnsetWorkspace),
+    GetWorktree(GetWorktree),
     FocusWorktree(FocusWorktree),
-    FocusBranch(FocusBranch),
+    CreateWorktree(CreateWorktree),
     CreateBranch(CreateBranch),
     RemoveWorktree(RemoveWorktree),
-    OpenTerminal(OpenTerminal),
     SetRepo(SetRepo),
+    SetRepoSetup(SetRepoCommand),
+    SetRepoTeardown(SetRepoCommand),
     RemoveRepo(RemoveRepo),
     ListRepos(ListRepos),
 }
@@ -70,16 +72,20 @@ pub struct UnsetWorkspace {
 }
 
 #[derive(Debug, Args)]
+pub struct GetWorktree {
+    #[arg(long)]
+    pub workspace_id: Option<u64>,
+}
+
+#[derive(Debug, Args)]
 pub struct FocusWorktree {
     pub worktree: String,
 }
 
 #[derive(Debug, Args)]
-pub struct FocusBranch {
-    #[arg(long)]
-    pub repo: Option<String>,
-    #[arg(long)]
-    pub add_worktree: bool,
+pub struct CreateWorktree {
+    #[arg(long, required = true)]
+    pub repo: String,
     pub branch: String,
 }
 
@@ -87,6 +93,8 @@ pub struct FocusBranch {
 pub struct CreateBranch {
     #[arg(long)]
     pub repo: Option<String>,
+    #[arg(long = "from")]
+    pub from_branch: Option<String>,
     pub branch: String,
 }
 
@@ -101,23 +109,19 @@ pub struct RemoveWorktree {
 }
 
 #[derive(Debug, Args)]
-pub struct OpenTerminal {
-    #[arg(long)]
-    pub workspace_id: Option<u64>,
-    #[arg(last = true)]
-    pub command: Vec<String>,
-}
-
-#[derive(Debug, Args)]
 pub struct SetRepo {
     #[arg(long)]
     pub repo: Option<String>,
     #[arg(long)]
-    pub setup: Option<String>,
-    #[arg(long)]
-    pub teardown: Option<String>,
-    #[arg(long)]
     pub bare: Option<BoolArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetRepoCommand {
+    #[arg(long)]
+    pub repo: String,
+    #[arg(last = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -143,4 +147,3 @@ pub struct ListRepos {
     #[arg(long)]
     pub json: bool,
 }
-

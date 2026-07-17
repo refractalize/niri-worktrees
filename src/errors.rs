@@ -17,12 +17,6 @@ pub enum AppError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("TOML error at {path}: {source}")]
-    Toml {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
     #[error("{0}")]
     Command(CommandError),
 }
@@ -93,4 +87,3 @@ pub type Result<T> = std::result::Result<T, AppError>;
 pub fn message<T>(message: impl Into<String>) -> Result<T> {
     Err(AppError::Message(message.into()))
 }
-

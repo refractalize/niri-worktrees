@@ -141,18 +141,23 @@ fn normalize_repo(value: &Value) -> Option<Repo> {
     Some(Repo {
         path: normalize_path(path),
         bare: obj.get("bare").and_then(Value::as_bool).unwrap_or(false),
-        setup: obj.get("setup").and_then(Value::as_str).map(ToOwned::to_owned),
-        teardown: obj.get("teardown").and_then(Value::as_str).map(ToOwned::to_owned),
+        setup: obj.get("setup").and_then(command_array),
+        teardown: obj.get("teardown").and_then(command_array),
     })
+}
+
+fn command_array(value: &Value) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect()
 }
 
 pub fn set_worktree_mapping(store: &dyn Store, path: PathBuf, workspace_id: u64) -> Result<()> {
     let mut worktrees = store.load_worktrees()?;
-    if let Some(existing) = worktrees.iter_mut().find(|entry| entry.path == path) {
-        existing.workspace_id = workspace_id;
-    } else {
-        worktrees.push(WorktreeMapping { path, workspace_id });
-    }
+    worktrees.retain(|entry| entry.path != path && entry.workspace_id != workspace_id);
+    worktrees.push(WorktreeMapping { path, workspace_id });
     store.save_worktrees(&worktrees)
 }
 
@@ -173,6 +178,31 @@ pub fn unset_worktree_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct MemoryStore {
+        worktrees: RefCell<Vec<WorktreeMapping>>,
+    }
+
+    impl Store for MemoryStore {
+        fn load_worktrees(&self) -> Result<Vec<WorktreeMapping>> {
+            Ok(self.worktrees.borrow().clone())
+        }
+
+        fn save_worktrees(&self, worktrees: &[WorktreeMapping]) -> Result<()> {
+            self.worktrees.replace(worktrees.to_vec());
+            Ok(())
+        }
+
+        fn load_repos(&self) -> Result<Vec<Repo>> {
+            Ok(vec![])
+        }
+
+        fn save_repos(&self, _repos: &[Repo]) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn normalizes_legacy_mapping_keys() {
@@ -185,5 +215,40 @@ mod tests {
         let value = serde_json::json!({"path": "/tmp/repo"});
         assert!(!normalize_repo(&value).unwrap().bare);
     }
-}
 
+    #[test]
+    fn setting_mapping_replaces_existing_path_and_workspace() {
+        let store = MemoryStore {
+            worktrees: RefCell::new(vec![
+                WorktreeMapping {
+                    path: PathBuf::from("/repo/a"),
+                    workspace_id: 1,
+                },
+                WorktreeMapping {
+                    path: PathBuf::from("/repo/b"),
+                    workspace_id: 2,
+                },
+                WorktreeMapping {
+                    path: PathBuf::from("/repo/c"),
+                    workspace_id: 3,
+                },
+            ]),
+        };
+
+        set_worktree_mapping(&store, PathBuf::from("/repo/c"), 2).unwrap();
+
+        assert_eq!(
+            store.worktrees.borrow().as_slice(),
+            [
+                WorktreeMapping {
+                    path: PathBuf::from("/repo/a"),
+                    workspace_id: 1,
+                },
+                WorktreeMapping {
+                    path: PathBuf::from("/repo/c"),
+                    workspace_id: 2,
+                },
+            ]
+        );
+    }
+}

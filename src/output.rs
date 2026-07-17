@@ -79,11 +79,15 @@ pub fn print_repos(rows: &[(Repo, Option<String>)]) {
             Cell::new(repo.path.display().to_string()),
             Cell::new(origin.clone().unwrap_or_default()),
             Cell::new(repo.bare.to_string()),
-            Cell::new(repo.setup.clone().unwrap_or_default()),
-            Cell::new(repo.teardown.clone().unwrap_or_default()),
+            Cell::new(repo.setup.as_deref().map(command_display).unwrap_or_default()),
+            Cell::new(repo.teardown.as_deref().map(command_display).unwrap_or_default()),
         ]);
     }
     println!("{table}");
+}
+
+fn command_display(command: &[String]) -> String {
+    command.join(" ")
 }
 
 fn table() -> Table {
