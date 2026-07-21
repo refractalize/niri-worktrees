@@ -113,7 +113,7 @@ pub struct SetRepo {
     #[arg(long)]
     pub repo: Option<String>,
     #[arg(long)]
-    pub bare: Option<BoolArg>,
+    pub list_pull_requests: Option<BoolArg>,
 }
 
 #[derive(Debug, Args)]

@@ -385,7 +385,28 @@ fn set_repo_then_list_repos_json_uses_mock_git() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"repo_origin\": \"git@example.com:repo.git\""))
-        .stdout(predicate::str::contains("\"bare\": false"));
+        .stdout(predicate::str::contains("\"bare\": false"))
+        .stdout(predicate::str::contains("\"list_pull_requests\": false"));
+}
+
+#[test]
+fn set_repo_list_pull_requests_true_round_trips_through_list_repos_json() {
+    let env = TestEnv::new();
+    fs::create_dir_all(env.repo_path()).unwrap();
+    env.write_exe("git", git_mock());
+
+    env.cmd()
+        .args(["set-repo", "--repo"])
+        .arg(env.repo_path())
+        .args(["--list-pull-requests", "true"])
+        .assert()
+        .success();
+
+    env.cmd()
+        .args(["list-repos", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"list_pull_requests\": true"));
 }
 
 #[test]

@@ -140,7 +140,7 @@ fn normalize_repo(value: &Value) -> Option<Repo> {
     let path = obj.get("path")?.as_str()?;
     Some(Repo {
         path: normalize_path(path),
-        bare: obj.get("bare").and_then(Value::as_bool).unwrap_or(false),
+        list_pull_requests: obj.get("list_pull_requests").and_then(Value::as_bool).unwrap_or(false),
         setup: obj.get("setup").and_then(command_array),
         teardown: obj.get("teardown").and_then(command_array),
     })
@@ -211,9 +211,9 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_repo_defaults_bare_false() {
+    fn normalizes_repo_defaults_list_pull_requests_false() {
         let value = serde_json::json!({"path": "/tmp/repo"});
-        assert!(!normalize_repo(&value).unwrap().bare);
+        assert!(!normalize_repo(&value).unwrap().list_pull_requests);
     }
 
     #[test]

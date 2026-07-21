@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/vicinaehq/vicinae/refs/heads/main/extra/schemas/extension.json",
+  "name": "niri-worktrees",
+  "title": "Niri Worktrees",
+  "description": "Manage Git worktrees and Niri workspaces together",
+  "categories": [
+    "Developer Tools",
+    "Productivity"
+  ],
+  "license": "MIT",
+  "author": "timmacfarlane",
+  "contributors": [],
+  "pastContributors": [],
+  "icon": "extension_icon.svg",
+  "commands": [
+    {
+      "name": "worktrees",
+      "title": "Worktrees",
+      "subtitle": "List active worktrees",
+      "description": "List Git worktrees with their Niri workspace mappings",
+      "mode": "view"
+    },
+    {
+      "name": "branches",
+      "title": "Branches",
+      "subtitle": "List branches across repos",
+      "description": "List all branches across stored repositories with worktree and workspace info",
+      "mode": "view"
+    },
+    {
+      "name": "pull-requests",
+      "title": "Pull Requests",
+      "subtitle": "List branches with open PRs",
+      "description": "List branches that have open GitHub pull requests",
+      "mode": "view"
+    },
+    {
+      "name": "create-branch",
+      "title": "Create Branch",
+      "subtitle": "Create a new branch and worktree",
+      "description": "Create a new local branch, worktree, and Niri workspace",
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "build": "vici build",
+    "dev": "vici develop",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts,.tsx",
+    "lint:fix": "eslint src --ext .ts,.tsx --fix",
+    "format": "prettier --write src/**/*.{ts,tsx}",
+    "format:check": "prettier --check src/**/*.{ts,tsx}"
+  },
+  "dependencies": {
+    "@vicinae/api": "^0.20.7"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "eslint": "^9.39.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.47.0"
+  }
+}

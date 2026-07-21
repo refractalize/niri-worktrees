@@ -17,7 +17,7 @@ pub struct WorktreeStore {
 pub struct Repo {
     pub path: PathBuf,
     #[serde(default)]
-    pub bare: bool,
+    pub list_pull_requests: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +51,9 @@ pub struct BranchRow {
 pub struct PullRequestRow {
     pub pr_number: Option<u64>,
     pub status: Option<String>,
+    pub unresolved_review_comments: Option<u64>,
+    pub total_review_comments: Option<u64>,
+    pub checks_status: Option<String>,
     pub local_branch: Option<String>,
     pub remote_branch: Option<String>,
     pub repo: PathBuf,
@@ -77,4 +80,7 @@ pub struct PullRequest {
     pub head_ref_name: String,
     pub pr_number: Option<u64>,
     pub status: Option<String>,
+    pub unresolved_review_comments: Option<u64>,
+    pub total_review_comments: Option<u64>,
+    pub checks_status: Option<String>,
 }

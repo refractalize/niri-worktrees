@@ -115,11 +115,28 @@ fn cmd_list_branches(args: cli::ListBranches, env: &dyn Env) -> Result<()> {
 }
 
 fn cmd_list_pull_requests(args: cli::ListPullRequests, env: &dyn Env) -> Result<()> {
-    let repos = repos_for_arg(env, args.repo.as_deref())?;
+    let mut repos = repos_for_arg(env, args.repo.as_deref())?;
+    if args.repo.is_none() {
+        let had_repos = !repos.is_empty();
+        repos.retain(|repo| repo.list_pull_requests);
+        if had_repos && repos.is_empty() {
+            eprintln!(
+                "Warning: no repos have --list-pull-requests enabled. Run `niri-worktrees set-repo --repo <repo> --list-pull-requests true` to enable it."
+            );
+        }
+    }
     let workspace_ids = workspace_ids_by_worktree(env.store())?;
+    let runner = env.runner();
+    let results: Vec<Result<Vec<PullRequestRow>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = repos
+            .iter()
+            .map(|repo| scope.spawn(|| pull_requests_for_repo(runner, repo, &workspace_ids)))
+            .collect();
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+    });
     let mut rows = vec![];
-    for repo in repos {
-        rows.extend(pull_requests_for_repo(env.runner(), &repo, &workspace_ids)?);
+    for result in results {
+        rows.extend(result?);
     }
     if args.json {
         output::print_json("pull_requests", rows)
@@ -182,7 +199,7 @@ fn cmd_create_worktree(args: cli::CreateWorktree, env: &dyn Env) -> Result<()> {
     if !git::local_branch_exists(env.runner(), &repo_path, &args.branch) {
         return message(format!("Local branch {} does not exist", args.branch));
     }
-    let worktree = worktree_path_for_repo_branch(&repo, &args.branch);
+    let worktree = worktree_path_for_repo_branch(env.runner(), &repo, &args.branch);
     if worktree.exists() {
         return message(format!("Cannot create worktree because {} already exists", worktree.display()));
     }
@@ -200,7 +217,7 @@ fn cmd_create_branch(args: cli::CreateBranch, env: &dyn Env) -> Result<()> {
     if git::local_branch_exists(env.runner(), &repo_path, &args.branch) {
         return message(format!("Local branch {} already exists", args.branch));
     }
-    let worktree = worktree_path_for_repo_branch(&repo, &args.branch);
+    let worktree = worktree_path_for_repo_branch(env.runner(), &repo, &args.branch);
     if worktree.exists() {
         return message(format!("Cannot create worktree because {} already exists", worktree.display()));
     }
@@ -231,13 +248,13 @@ fn cmd_set_repo(args: cli::SetRepo, env: &dyn Env) -> Result<()> {
     }
     let mut repos = env.store().load_repos()?;
     if let Some(repo) = repos.iter_mut().find(|repo| repo.path == repo_path) {
-        if let Some(bare) = args.bare {
-            repo.bare = bool::from(bare);
+        if let Some(list_pull_requests) = args.list_pull_requests {
+            repo.list_pull_requests = bool::from(list_pull_requests);
         }
     } else {
         repos.push(Repo {
             path: repo_path,
-            bare: args.bare.map(bool::from).unwrap_or(false),
+            list_pull_requests: args.list_pull_requests.map(bool::from).unwrap_or(false),
             setup: None,
             teardown: None,
         });
@@ -272,23 +289,25 @@ fn cmd_remove_repo(args: cli::RemoveRepo, env: &dyn Env) -> Result<()> {
 }
 
 fn cmd_list_repos(args: cli::ListRepos, env: &dyn Env) -> Result<()> {
-    let rows: Vec<(Repo, Option<String>)> = env
+    let rows: Vec<(Repo, Option<String>, bool)> = env
         .store()
         .load_repos()?
         .into_iter()
         .map(|repo| {
             let origin = git::remote_url(env.runner(), &repo.path, "origin");
-            (repo, origin)
+            let bare = git::is_bare_repository(env.runner(), &repo.path);
+            (repo, origin, bare)
         })
         .collect();
     if args.json {
         let repos: Vec<Value> = rows
             .into_iter()
-            .map(|(repo, origin)| {
+            .map(|(repo, origin, bare)| {
                 json!({
                     "path": repo.path,
                     "repo_origin": origin,
-                    "bare": repo.bare,
+                    "bare": bare,
+                    "list_pull_requests": repo.list_pull_requests,
                     "setup": repo.setup,
                     "teardown": repo.teardown,
                 })
@@ -441,12 +460,13 @@ fn branches_for_repo(
     let remote_branches: HashSet<String> =
         git::branch_names(runner, &repo.path, false, true)?.into_iter().collect();
     let worktrees = git::worktree_branches(runner, &repo.path)?;
+    let upstreams = git::branch_upstreams(runner, &repo.path);
     let mut rows = vec![];
     let mut paired_remotes = HashSet::new();
 
     if !remote_only {
         for branch in &local_branches {
-            let upstream = git::branch_upstream(runner, &repo.path, branch);
+            let upstream = upstreams.get(branch).cloned();
             let remote_branch = upstream.filter(|upstream| remote_branches.contains(upstream));
             if let Some(remote_branch) = &remote_branch {
                 paired_remotes.insert(remote_branch.clone());
@@ -464,7 +484,7 @@ fn branches_for_repo(
 
     if remote_only {
         for branch in &local_branches {
-            let Some(upstream) = git::branch_upstream(runner, &repo.path, branch) else {
+            let Some(upstream) = upstreams.get(branch).cloned() else {
                 continue;
             };
             if !remote_branches.contains(&upstream) {
@@ -506,8 +526,13 @@ fn pull_requests_for_repo(
     repo: &Repo,
     workspace_ids: &HashMap<PathBuf, u64>,
 ) -> Result<Vec<PullRequestRow>> {
-    let branches = branches_for_repo(runner, repo, false, false, workspace_ids)?;
-    let prs = github::pull_requests(runner, &repo.path)?;
+    let (branches, prs) = std::thread::scope(|scope| {
+        let branches_handle = scope.spawn(|| branches_for_repo(runner, repo, false, false, workspace_ids));
+        let prs_handle = scope.spawn(|| github::pull_requests(runner, &repo.path));
+        (branches_handle.join().unwrap(), prs_handle.join().unwrap())
+    });
+    let branches = branches?;
+    let prs = prs?;
     let mut rows = vec![];
     for pr in prs {
         let branch_row = branch_row_for_pr(&pr.head_ref_name, &branches);
@@ -526,6 +551,9 @@ fn pull_requests_for_repo(
         rows.push(PullRequestRow {
             pr_number: pr.pr_number,
             status: pr.status,
+            unresolved_review_comments: pr.unresolved_review_comments,
+            total_review_comments: pr.total_review_comments,
+            checks_status: pr.checks_status,
             local_branch: branch_row.local_branch,
             remote_branch: branch_row.remote_branch,
             repo: branch_row.repo,
@@ -588,8 +616,8 @@ fn focus_worktree(env: &dyn Env, worktree: PathBuf) -> Result<()> {
     store::set_worktree_mapping(env.store(), worktree, workspace_id)
 }
 
-fn worktree_path_for_repo_branch(repo: &Repo, branch: &str) -> PathBuf {
-    let base = if repo.bare {
+fn worktree_path_for_repo_branch(runner: &dyn CommandRunner, repo: &Repo, branch: &str) -> PathBuf {
+    let base = if git::is_bare_repository(runner, &repo.path) {
         repo.path.clone()
     } else {
         repo.path

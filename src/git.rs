@@ -19,6 +19,12 @@ pub fn is_git_repository(runner: &dyn CommandRunner, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_bare_repository(runner: &dyn CommandRunner, path: &Path) -> bool {
+    git(runner, path, &["rev-parse", "--is-bare-repository"])
+        .map(|out| out.status == 0 && out.stdout.trim() == "true")
+        .unwrap_or(false)
+}
+
 pub fn common_dir(runner: &dyn CommandRunner, path: &Path) -> Option<PathBuf> {
     let out = git(runner, path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
     if out.status != 0 {
@@ -105,6 +111,24 @@ pub fn branch_upstream(runner: &dyn CommandRunner, repo: &Path, branch: &str) ->
     (!stdout.is_empty()).then(|| stdout.to_string())
 }
 
+pub fn branch_upstreams(runner: &dyn CommandRunner, repo: &Path) -> HashMap<String, String> {
+    let out = match git(
+        runner,
+        repo,
+        &["for-each-ref", "--format=%(refname:short)%09%(upstream:short)", "refs/heads"],
+    ) {
+        Ok(out) if out.status == 0 => out,
+        _ => return HashMap::new(),
+    };
+    out.stdout
+        .lines()
+        .filter_map(|line| {
+            let (branch, upstream) = line.split_once('\t')?;
+            (!upstream.is_empty()).then(|| (branch.to_string(), upstream.to_string()))
+        })
+        .collect()
+}
+
 pub fn remote_url(runner: &dyn CommandRunner, repo: &Path, remote: &str) -> Option<String> {
     let out = git(runner, repo, &["remote", "get-url", remote]).ok()?;
     if out.status != 0 {
@@ -123,10 +147,9 @@ pub fn worktrees(runner: &dyn CommandRunner, repo: &Repo) -> Result<Vec<GitWorkt
             suffix_stderr(&out.stderr)
         ));
     }
-    let mut rows = parse_worktree_list(&out.stdout, &repo.path, |branch| {
-        branch_upstream(runner, &repo.path, branch)
-    });
-    if repo.bare {
+    let upstreams = branch_upstreams(runner, &repo.path);
+    let mut rows = parse_worktree_list(&out.stdout, &repo.path, |branch| upstreams.get(branch).cloned());
+    if is_bare_repository(runner, &repo.path) {
         rows.retain(|row| row.path != normalize_path(&repo.path));
     }
     Ok(rows)
@@ -144,7 +167,8 @@ pub fn worktree_branches(
             suffix_stderr(&out.stderr)
         ));
     }
-    let rows = parse_worktree_list(&out.stdout, repo, |branch| branch_upstream(runner, repo, branch));
+    let upstreams = branch_upstreams(runner, repo);
+    let rows = parse_worktree_list(&out.stdout, repo, |branch| upstreams.get(branch).cloned());
     Ok(rows
         .into_iter()
         .filter_map(|row| row.local_branch.map(|branch| (branch, (row.path, row.remote_branch))))

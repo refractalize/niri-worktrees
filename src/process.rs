@@ -9,7 +9,7 @@ pub struct CmdOutput {
     pub stderr: String,
 }
 
-pub trait CommandRunner {
+pub trait CommandRunner: Sync {
     fn run(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<CmdOutput>;
     fn run_inherit(&self, program: &str, args: &[String], cwd: Option<&Path>) -> std::io::Result<i32>;
 }
