@@ -138,12 +138,52 @@ fn cmd_list_pull_requests(args: cli::ListPullRequests, env: &dyn Env) -> Result<
     for result in results {
         rows.extend(result?);
     }
+    let workspaces = env.niri().workspaces()?;
+    let windows = env.niri().windows()?;
+    sort_pull_request_rows(&mut rows, &workspaces, &windows);
     if args.json {
         output::print_json("pull_requests", rows)
     } else {
         output::print_pull_requests(&rows);
         Ok(())
     }
+}
+
+fn sort_pull_request_rows(rows: &mut [PullRequestRow], workspaces: &[Value], windows: &[Value]) {
+    let focused_workspace_ids: HashSet<u64> = workspaces
+        .iter()
+        .filter(|workspace| workspace.get("is_focused").and_then(Value::as_bool) == Some(true))
+        .filter_map(|workspace| workspace.get("id").and_then(Value::as_u64))
+        .collect();
+    let latest = niri::latest_focus_timestamps_by_workspace(windows);
+    rows.sort_by(|a, b| {
+        let a_focused = a
+            .workspace_id
+            .is_some_and(|id| focused_workspace_ids.contains(&id));
+        let b_focused = b
+            .workspace_id
+            .is_some_and(|id| focused_workspace_ids.contains(&id));
+        let a_timestamp = a.workspace_id.and_then(|id| latest.get(&id).copied());
+        let b_timestamp = b.workspace_id.and_then(|id| latest.get(&id).copied());
+        (
+            b_focused,
+            b_timestamp.is_some(),
+            b_timestamp,
+            &b.repo,
+            &b.worktree,
+            &b.local_branch,
+            b.pr_number,
+        )
+            .cmp(&(
+                a_focused,
+                a_timestamp.is_some(),
+                a_timestamp,
+                &a.repo,
+                &a.worktree,
+                &a.local_branch,
+                a.pr_number,
+            ))
+    });
 }
 
 fn cmd_set_workspace(args: cli::SetWorkspace, env: &dyn Env) -> Result<()> {
@@ -814,9 +854,68 @@ fn command_from_app(err: AppError) -> CommandError {
 mod tests {
     use super::*;
 
+    fn pull_request_row(pr_number: u64, workspace_id: Option<u64>) -> PullRequestRow {
+        PullRequestRow {
+            pr_number: Some(pr_number),
+            status: Some("OPEN".to_string()),
+            unresolved_review_comments: None,
+            total_review_comments: None,
+            checks_status: None,
+            local_branch: Some(format!("feature-{pr_number}")),
+            remote_branch: None,
+            repo: PathBuf::from("/repo"),
+            worktree: workspace_id.map(|id| PathBuf::from(format!("/worktree-{id}"))),
+            workspace_id,
+        }
+    }
+
     #[test]
     fn branch_pr_name_strips_remote_prefix() {
         assert_eq!(branch_pr_name("origin/feature"), "feature");
         assert_eq!(branch_pr_name("feature"), "feature");
+    }
+
+    #[test]
+    fn pull_requests_are_sorted_by_latest_window_activity() {
+        let mut rows = vec![
+            pull_request_row(1, Some(1)),
+            pull_request_row(2, None),
+            pull_request_row(3, Some(2)),
+        ];
+        let workspaces = vec![
+            json!({"id": 1, "is_focused": false}),
+            json!({"id": 2, "is_focused": false}),
+        ];
+        let windows = vec![
+            json!({"workspace_id": 1, "focus_timestamp": {"secs": 10, "nanos": 0}}),
+            json!({"workspace_id": 2, "focus_timestamp": {"secs": 20, "nanos": 0}}),
+        ];
+
+        sort_pull_request_rows(&mut rows, &workspaces, &windows);
+
+        assert_eq!(
+            rows.iter().map(|row| row.pr_number).collect::<Vec<_>>(),
+            vec![Some(3), Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn pull_requests_put_the_focused_workspace_first() {
+        let mut rows = vec![pull_request_row(1, Some(1)), pull_request_row(2, Some(2))];
+        let workspaces = vec![
+            json!({"id": 1, "is_focused": true}),
+            json!({"id": 2, "is_focused": false}),
+        ];
+        let windows = vec![
+            json!({"workspace_id": 1, "focus_timestamp": {"secs": 10, "nanos": 0}}),
+            json!({"workspace_id": 2, "focus_timestamp": {"secs": 20, "nanos": 0}}),
+        ];
+
+        sort_pull_request_rows(&mut rows, &workspaces, &windows);
+
+        assert_eq!(
+            rows.iter().map(|row| row.pr_number).collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
     }
 }
