@@ -2,7 +2,7 @@ use crate::errors::{message, AppError, Result};
 use crate::models::{GitWorktree, Repo};
 use crate::paths::normalize_path;
 use crate::process::CommandRunner;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 fn git(runner: &dyn CommandRunner, repo: &Path, args: &[&str]) -> Result<crate::process::CmdOutput> {
@@ -203,6 +203,33 @@ pub fn default_origin_branch(runner: &dyn CommandRunner, repo: &Path) -> Result<
         }
     }
     message(format!("Could not determine origin default branch for {}", repo.display()))
+}
+
+pub fn branches_merged_into(
+    runner: &dyn CommandRunner,
+    repo: &Path,
+    base: &str,
+) -> Result<HashSet<String>> {
+    let merged = format!("--merged={base}");
+    let out = git(
+        runner,
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            &merged,
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
+    if out.status != 0 {
+        return message(format!(
+            "Could not determine branches merged into {base} for {}{}",
+            repo.display(),
+            suffix_stderr(&out.stderr)
+        ));
+    }
+    Ok(out.stdout.lines().map(ToOwned::to_owned).collect())
 }
 
 pub fn create_branch_worktree(

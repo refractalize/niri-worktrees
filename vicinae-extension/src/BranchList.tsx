@@ -114,6 +114,9 @@ export default function BranchList({ pr = false, navigationTitle, emptyTitle, em
                 subtitle={branch.local_branch !== null ? remoteName : ''}
                 icon={Icon.Git}
                 accessories={[
+                  branch.is_merged_into_default_branch
+                    ? { tag: { value: 'Merged', color: Color.Purple } }
+                    : {},
                   branch.workspace_id !== null
                     ? { tag: { value: String(branch.workspace_id), color: Color.Green } }
                     : { tag: { value: 'no workspace', color: Color.SecondaryText } },

@@ -42,6 +42,7 @@ pub struct GitWorktree {
 pub struct BranchRow {
     pub local_branch: Option<String>,
     pub remote_branch: Option<String>,
+    pub is_merged_into_default_branch: bool,
     pub repo: PathBuf,
     pub worktree: Option<PathBuf>,
     pub workspace_id: Option<u64>,

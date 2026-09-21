@@ -104,7 +104,13 @@ fn cmd_list_branches(args: cli::ListBranches, env: &dyn Env) -> Result<()> {
     let workspace_ids = workspace_ids_by_worktree(env.store())?;
     let mut rows = vec![];
     for repo in repos {
-        rows.extend(branches_for_repo(env.runner(), &repo, args.local, args.remote, &workspace_ids)?);
+        rows.extend(branches_with_merge_status_for_repo(
+            env.runner(),
+            &repo,
+            args.local,
+            args.remote,
+            &workspace_ids,
+        )?);
     }
     if args.json {
         output::print_json("branches", rows)
@@ -515,6 +521,7 @@ fn branches_for_repo(
             rows.push(BranchRow {
                 local_branch: Some(branch.clone()),
                 remote_branch,
+                is_merged_into_default_branch: false,
                 repo: repo.path.clone(),
                 workspace_id: worktree.as_ref().and_then(|path| workspace_ids.get(path).copied()),
                 worktree,
@@ -535,6 +542,7 @@ fn branches_for_repo(
             rows.push(BranchRow {
                 local_branch: Some(branch.clone()),
                 remote_branch: Some(upstream),
+                is_merged_into_default_branch: false,
                 repo: repo.path.clone(),
                 workspace_id: worktree.as_ref().and_then(|path| workspace_ids.get(path).copied()),
                 worktree,
@@ -551,12 +559,31 @@ fn branches_for_repo(
             }
             rows.push(BranchRow {
                 local_branch: None,
+                is_merged_into_default_branch: false,
                 remote_branch: Some(branch),
                 repo: repo.path.clone(),
                 worktree: None,
                 workspace_id: None,
             });
         }
+    }
+    Ok(rows)
+}
+
+fn branches_with_merge_status_for_repo(
+    runner: &dyn CommandRunner,
+    repo: &Repo,
+    local_only: bool,
+    remote_only: bool,
+    workspace_ids: &HashMap<PathBuf, u64>,
+) -> Result<Vec<BranchRow>> {
+    let default_branch = git::default_origin_branch(runner, &repo.path)?;
+    let merged_branches = git::branches_merged_into(runner, &repo.path, &default_branch)?;
+    let mut rows = branches_for_repo(runner, repo, local_only, remote_only, workspace_ids)?;
+    for row in &mut rows {
+        let branch = row.local_branch.as_ref().or(row.remote_branch.as_ref());
+        row.is_merged_into_default_branch =
+            branch.is_some_and(|branch| merged_branches.contains(branch));
     }
     Ok(rows)
 }
@@ -582,6 +609,7 @@ fn pull_requests_for_repo(
             None if pr.status.as_deref() == Some("OPEN") => BranchRow {
                 local_branch: Some(pr.head_ref_name.clone()),
                 remote_branch: None,
+                is_merged_into_default_branch: false,
                 repo: repo.path.clone(),
                 worktree: None,
                 workspace_id: None,

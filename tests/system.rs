@@ -109,6 +109,22 @@ case "$args" in
   *"rev-parse --git-dir"*) exit 0 ;;
   *"rev-parse --path-format=absolute --git-common-dir"*) echo "/tmp/common.git"; exit 0 ;;
   *"remote get-url origin"*) echo "git@example.com:repo.git"; exit 0 ;;
+  *"symbolic-ref --short refs/remotes/origin/HEAD"*)
+    if [ "$GIT_MOCK_NO_ORIGIN_HEAD" = "1" ]; then exit 1; fi
+    echo "origin/main"
+    exit 0
+    ;;
+  *"for-each-ref --format=%(refname:short) --merged=origin/main refs/heads refs/remotes"*)
+    echo "main"
+    echo "origin/main"
+    echo "origin/orphan"
+    exit 0
+    ;;
+  *"for-each-ref --format=%(refname:short) --merged=origin/master refs/heads refs/remotes"*)
+    echo "master"
+    echo "origin/master"
+    exit 0
+    ;;
   *"worktree list --porcelain"*)
     repo=""
     while [ "$#" -gt 0 ]; do
@@ -123,12 +139,22 @@ case "$args" in
     exit 0
     ;;
   *"for-each-ref --format=%(refname:short) refs/heads"*) echo "main"; echo "feature"; exit 0 ;;
-  *"for-each-ref --format=%(refname:short) refs/remotes"*) echo "origin"; echo "origin/main"; echo "origin/feature"; exit 0 ;;
+  *"for-each-ref --format=%(refname:short) refs/remotes"*)
+    echo "origin"
+    if [ "$GIT_MOCK_DEFAULT_MASTER" = "1" ]; then echo "origin/master"; else echo "origin/main"; fi
+    echo "origin/feature"
+    echo "origin/orphan"
+    exit 0
+    ;;
   *"for-each-ref --format=%(upstream:short) refs/heads/main"*) echo "origin/main"; exit 0 ;;
   *"for-each-ref --format=%(upstream:short) refs/heads/feature"*) echo "origin/feature"; exit 0 ;;
   *"show-ref --verify --quiet refs/heads/feature"*) exit 0 ;;
   *"show-ref --verify --quiet refs/heads/missing"*) exit 1 ;;
   *"show-ref --verify --quiet refs/heads/new-feature"*) exit 1 ;;
+  *"show-ref --verify --quiet refs/remotes/origin/main"*)
+    if [ "$GIT_MOCK_DEFAULT_MASTER" = "1" ]; then exit 1; else exit 0; fi
+    ;;
+  *"show-ref --verify --quiet refs/remotes/origin/master"*) exit 0 ;;
   *"worktree add"*" feature"*)
     echo "$args" > "$GIT_MOCK_LOG"
     exit 0
@@ -593,8 +619,66 @@ fn list_branches_json_uses_git_mocks() {
         .success()
         .stdout(predicate::str::contains("\"local_branch\": \"feature\""))
         .stdout(predicate::str::contains("\"remote_branch\": \"origin/feature\""))
+        .stdout(predicate::str::contains("\"is_merged_into_default_branch\": false"))
         .stdout(predicate::str::contains("\"remote_branch\": \"origin\"").not())
         .stdout(predicate::str::contains("\"workspace_id\": 2"));
+}
+
+#[test]
+fn list_branches_table_includes_merged_status() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+
+    env.cmd()
+        .args(["list-branches", "--repo"])
+        .arg(env.repo_path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Merged"))
+        .stdout(predicate::str::contains("true"))
+        .stdout(predicate::str::contains("false"));
+}
+
+#[test]
+fn list_remote_branches_reports_merge_status_for_remote_only_rows() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+
+    let output = env
+        .cmd()
+        .args(["list-branches", "--json", "--remote", "--repo"])
+        .arg(env.repo_path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let orphan = value["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["remote_branch"] == "origin/orphan")
+        .unwrap();
+    assert_eq!(orphan["local_branch"], serde_json::Value::Null);
+    assert_eq!(orphan["is_merged_into_default_branch"], true);
+}
+
+#[test]
+fn list_branches_falls_back_to_origin_master() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+
+    env.cmd()
+        .env("GIT_MOCK_NO_ORIGIN_HEAD", "1")
+        .env("GIT_MOCK_DEFAULT_MASTER", "1")
+        .args(["list-branches", "--json", "--repo"])
+        .arg(env.repo_path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"remote_branch\": \"origin/master\""))
+        .stdout(predicate::str::contains("\"is_merged_into_default_branch\": true"));
 }
 
 #[test]

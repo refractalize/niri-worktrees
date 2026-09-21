@@ -41,11 +41,19 @@ pub fn print_worktrees(rows: &[WorktreeRow]) {
 
 pub fn print_branches(rows: &[BranchRow]) {
     let mut table = table();
-    table.set_header(["Local Branch", "Remote Branch", "Repo", "Worktree", "Workspace ID"]);
+    table.set_header([
+        "Local Branch",
+        "Remote Branch",
+        "Merged",
+        "Repo",
+        "Worktree",
+        "Workspace ID",
+    ]);
     for row in rows {
         table.add_row([
             row.local_branch.clone().unwrap_or_default(),
             row.remote_branch.clone().unwrap_or_default(),
+            row.is_merged_into_default_branch.to_string(),
             row.repo.display().to_string(),
             row.worktree.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             row.workspace_id.map(|id| id.to_string()).unwrap_or_default(),
