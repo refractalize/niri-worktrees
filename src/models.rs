@@ -36,13 +36,15 @@ pub struct GitWorktree {
     pub repo: PathBuf,
     pub local_branch: Option<String>,
     pub remote_branch: Option<String>,
+    pub commit_timestamp: Option<i64>,
+    pub is_merged_into_default_branch: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BranchRow {
     pub local_branch: Option<String>,
     pub remote_branch: Option<String>,
-    pub is_merged_into_default_branch: bool,
+    pub is_merged_into_default_branch: Option<bool>,
     pub repo: PathBuf,
     pub worktree: Option<PathBuf>,
     pub workspace_id: Option<u64>,
@@ -70,10 +72,11 @@ pub struct WorktreeRow {
     pub remote_branch: Option<String>,
     pub workspace: Option<serde_json::Value>,
     pub windows: Vec<serde_json::Value>,
-    #[serde(skip)]
-    pub is_focused: bool,
+    pub is_merged_into_default_branch: Option<bool>,
     #[serde(skip)]
     pub focus_timestamp: Option<(i64, i64)>,
+    #[serde(skip)]
+    pub commit_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

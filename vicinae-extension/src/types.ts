@@ -24,6 +24,7 @@ export interface Worktree {
   repo: string | null;
   local_branch: string | null;
   remote_branch: string | null;
+  is_merged_into_default_branch: boolean | null;
   workspace: NiriWorkspace | null;
   windows: NiriWindow[];
 }
@@ -31,7 +32,7 @@ export interface Worktree {
 export interface Branch {
   local_branch: string | null;
   remote_branch: string | null;
-  is_merged_into_default_branch: boolean;
+  is_merged_into_default_branch: boolean | null;
   repo: string;
   worktree: string | null;
   workspace_id: number | null;

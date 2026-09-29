@@ -1,0 +1,19 @@
+[tasks.build]
+description = "Build the release binary"
+run = "cargo build --release"
+
+[tasks.install]
+description = "Build and install the CLI"
+depends = ["build"]
+run = 'install -Dm755 target/release/niri-worktrees "$HOME/.local/bin/niri-worktrees"'
+
+[tasks.install-vicinae-extension]
+description = "Build and install the Vicinae extension"
+run = [
+  "npm --prefix vicinae-extension ci",
+  "npm --prefix vicinae-extension run build",
+]
+
+[tasks.test]
+description = "Run Rust tests"
+run = "cargo test"

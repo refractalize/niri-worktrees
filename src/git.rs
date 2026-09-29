@@ -111,11 +111,21 @@ pub fn branch_upstream(runner: &dyn CommandRunner, repo: &Path, branch: &str) ->
     (!stdout.is_empty()).then(|| stdout.to_string())
 }
 
-pub fn branch_upstreams(runner: &dyn CommandRunner, repo: &Path) -> HashMap<String, String> {
+#[derive(Debug, Default)]
+struct LocalBranchInfo {
+    upstream: Option<String>,
+    commit_timestamp: Option<i64>,
+}
+
+fn local_branch_info(runner: &dyn CommandRunner, repo: &Path) -> HashMap<String, LocalBranchInfo> {
     let out = match git(
         runner,
         repo,
-        &["for-each-ref", "--format=%(refname:short)%09%(upstream:short)", "refs/heads"],
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(upstream:short)%09%(committerdate:unix)",
+            "refs/heads",
+        ],
     ) {
         Ok(out) if out.status == 0 => out,
         _ => return HashMap::new(),
@@ -123,9 +133,28 @@ pub fn branch_upstreams(runner: &dyn CommandRunner, repo: &Path) -> HashMap<Stri
     out.stdout
         .lines()
         .filter_map(|line| {
-            let (branch, upstream) = line.split_once('\t')?;
-            (!upstream.is_empty()).then(|| (branch.to_string(), upstream.to_string()))
+            let mut fields = line.splitn(3, '\t');
+            let branch = fields.next()?;
+            let upstream = fields
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let commit_timestamp = fields.next().and_then(|value| value.parse().ok());
+            Some((
+                branch.to_string(),
+                LocalBranchInfo {
+                    upstream,
+                    commit_timestamp,
+                },
+            ))
         })
+        .collect()
+}
+
+pub fn branch_upstreams(runner: &dyn CommandRunner, repo: &Path) -> HashMap<String, String> {
+    local_branch_info(runner, repo)
+        .into_iter()
+        .filter_map(|(branch, info)| info.upstream.map(|upstream| (branch, upstream)))
         .collect()
 }
 
@@ -147,8 +176,19 @@ pub fn worktrees(runner: &dyn CommandRunner, repo: &Repo) -> Result<Vec<GitWorkt
             suffix_stderr(&out.stderr)
         ));
     }
-    let upstreams = branch_upstreams(runner, &repo.path);
-    let mut rows = parse_worktree_list(&out.stdout, &repo.path, |branch| upstreams.get(branch).cloned());
+    let branch_info = local_branch_info(runner, &repo.path);
+    let merged_branches = branches_merged_into_default(runner, &repo.path);
+    let mut rows = parse_worktree_list(&out.stdout, &repo.path, |branch| {
+        branch_info
+            .get(branch)
+            .map(|info| (info.upstream.clone(), info.commit_timestamp))
+            .unwrap_or_default()
+    });
+    for row in &mut rows {
+        row.is_merged_into_default_branch = row.local_branch.as_ref().and_then(|branch| {
+            merged_branches.as_ref().and_then(|info| info.status(branch))
+        });
+    }
     if is_bare_repository(runner, &repo.path) {
         rows.retain(|row| row.path != normalize_path(&repo.path));
     }
@@ -167,8 +207,13 @@ pub fn worktree_branches(
             suffix_stderr(&out.stderr)
         ));
     }
-    let upstreams = branch_upstreams(runner, repo);
-    let rows = parse_worktree_list(&out.stdout, repo, |branch| upstreams.get(branch).cloned());
+    let branch_info = local_branch_info(runner, repo);
+    let rows = parse_worktree_list(&out.stdout, repo, |branch| {
+        branch_info
+            .get(branch)
+            .map(|info| (info.upstream.clone(), info.commit_timestamp))
+            .unwrap_or_default()
+    });
     Ok(rows
         .into_iter()
         .filter_map(|row| row.local_branch.map(|branch| (branch, (row.path, row.remote_branch))))
@@ -205,31 +250,63 @@ pub fn default_origin_branch(runner: &dyn CommandRunner, repo: &Path) -> Result<
     message(format!("Could not determine origin default branch for {}", repo.display()))
 }
 
-pub fn branches_merged_into(
+pub struct DefaultMergeInfo {
+    local_branch: String,
+    merged_branches: HashSet<String>,
+}
+
+impl DefaultMergeInfo {
+    pub fn status(&self, branch: &str) -> Option<bool> {
+        if branch == self.local_branch || branch == format!("origin/{}", self.local_branch) {
+            None
+        } else {
+            Some(self.merged_branches.contains(branch))
+        }
+    }
+}
+
+pub fn branches_merged_into_default(
     runner: &dyn CommandRunner,
     repo: &Path,
-    base: &str,
-) -> Result<HashSet<String>> {
-    let merged = format!("--merged={base}");
-    let out = git(
-        runner,
-        repo,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            &merged,
-            "refs/heads",
-            "refs/remotes",
-        ],
-    )?;
-    if out.status != 0 {
-        return message(format!(
-            "Could not determine branches merged into {base} for {}{}",
-            repo.display(),
-            suffix_stderr(&out.stderr)
-        ));
+) -> Option<DefaultMergeInfo> {
+    for (base, fallback_local_branch) in [
+        ("refs/remotes/origin/HEAD", None),
+        ("origin/main", Some("main")),
+        ("origin/master", Some("master")),
+    ] {
+        let merged = format!("--merged={base}");
+        let out = git(
+            runner,
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)%09%(symref:short)",
+                &merged,
+                "refs/heads",
+                "refs/remotes",
+            ],
+        )
+        .ok()?;
+        if out.status == 0 {
+            let mut local_branch = fallback_local_branch.map(ToOwned::to_owned);
+            let mut merged_branches = HashSet::new();
+            for line in out.stdout.lines() {
+                let (branch, symref) = line.split_once('\t').unwrap_or((line, ""));
+                if branch == "origin/HEAD" {
+                    local_branch = symref.strip_prefix("origin/").map(ToOwned::to_owned);
+                } else {
+                    merged_branches.insert(branch.to_string());
+                }
+            }
+            if let Some(local_branch) = local_branch {
+                return Some(DefaultMergeInfo {
+                    local_branch,
+                    merged_branches,
+                });
+            }
+        }
     }
-    Ok(out.stdout.lines().map(ToOwned::to_owned).collect())
+    None
 }
 
 pub fn create_branch_worktree(
@@ -328,9 +405,9 @@ pub fn remove_worktree(runner: &dyn CommandRunner, repo: &Path, worktree: &Path)
     git(runner, repo, &["worktree", "remove", &worktree.display().to_string()])
 }
 
-pub fn parse_worktree_list<F>(text: &str, repo: &Path, upstream: F) -> Vec<GitWorktree>
+pub fn parse_worktree_list<F>(text: &str, repo: &Path, branch_info: F) -> Vec<GitWorktree>
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> (Option<String>, Option<i64>),
 {
     let mut rows = Vec::new();
     let mut current: Option<GitWorktree> = None;
@@ -349,13 +426,17 @@ where
                     repo: repo.to_path_buf(),
                     local_branch: None,
                     remote_branch: None,
+                    commit_timestamp: None,
+                    is_merged_into_default_branch: None,
                 });
             }
             "branch" if value.starts_with("refs/heads/") => {
                 if let Some(row) = &mut current {
                     let branch = value.trim_start_matches("refs/heads/");
+                    let (upstream, commit_timestamp) = branch_info(branch);
                     row.local_branch = Some(branch.to_string());
-                    row.remote_branch = upstream(branch);
+                    row.remote_branch = upstream;
+                    row.commit_timestamp = commit_timestamp;
                 }
             }
             _ => {}
@@ -381,15 +462,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merge_status_excludes_local_and_remote_default_branches() {
+        let info = DefaultMergeInfo {
+            local_branch: "main".into(),
+            merged_branches: ["main", "origin/main", "feature", "origin/feature"]
+                .into_iter().map(String::from).collect(),
+        };
+        assert_eq!(info.status("main"), None);
+        assert_eq!(info.status("origin/main"), None);
+        assert_eq!(info.status("feature"), Some(true));
+        assert_eq!(info.status("origin/feature"), Some(true));
+        assert_eq!(info.status("unmerged"), Some(false));
+    }
+
+    #[test]
     fn parses_porcelain_worktree_list() {
         let rows = parse_worktree_list(
             "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/feat\nbranch refs/heads/feat\n",
             Path::new("/repo"),
-            |branch| (branch == "feat").then(|| "origin/feat".to_string()),
+            |branch| {
+                (
+                    (branch == "feat").then(|| "origin/feat".to_string()),
+                    (branch == "feat").then_some(123),
+                )
+            },
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].local_branch.as_deref(), Some("feat"));
         assert_eq!(rows[1].remote_branch.as_deref(), Some("origin/feat"));
+        assert_eq!(rows[1].commit_timestamp, Some(123));
     }
 
     #[test]

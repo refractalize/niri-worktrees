@@ -13,7 +13,15 @@ pub fn print_json<T: serde::Serialize>(key: &str, value: T) -> crate::errors::Re
 
 pub fn print_worktrees(rows: &[WorktreeRow]) {
     let mut table = table();
-    table.set_header(["Worktree", "Local Branch", "Remote Branch", "Repo", "Workspace ID", "Windows"]);
+    table.set_header([
+        "Worktree",
+        "Local Branch",
+        "Remote Branch",
+        "Merged",
+        "Repo",
+        "Workspace ID",
+        "Windows",
+    ]);
     for row in rows {
         let workspace_id = row
             .workspace
@@ -31,6 +39,9 @@ pub fn print_worktrees(rows: &[WorktreeRow]) {
             row.path.display().to_string(),
             row.local_branch.clone().unwrap_or_default(),
             row.remote_branch.clone().unwrap_or_default(),
+            row.is_merged_into_default_branch
+                .map(|merged| merged.to_string())
+                .unwrap_or_default(),
             row.repo.display().to_string(),
             workspace_id,
             windows,
@@ -53,7 +64,7 @@ pub fn print_branches(rows: &[BranchRow]) {
         table.add_row([
             row.local_branch.clone().unwrap_or_default(),
             row.remote_branch.clone().unwrap_or_default(),
-            row.is_merged_into_default_branch.to_string(),
+            row.is_merged_into_default_branch.map(|merged| merged.to_string()).unwrap_or_default(),
             row.repo.display().to_string(),
             row.worktree.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             row.workspace_id.map(|id| id.to_string()).unwrap_or_default(),

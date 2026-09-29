@@ -96,6 +96,9 @@ export default function Worktrees() {
             subtitle={subtitle}
             icon={isUrgent ? { source: Icon.Exclamationmark, tintColor: Color.Red } : Icon.CodeBlock}
             accessories={[
+              wt.is_merged_into_default_branch
+                ? { tag: { value: 'Merged', color: Color.Purple } }
+                : {},
               lastFocused !== null ? { text: lastFocused, icon: Icon.Clock } : {},
               windowCount > 0
                 ? {

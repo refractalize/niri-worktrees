@@ -458,11 +458,6 @@ fn worktree_rows(
             } else {
                 vec![]
             };
-            let is_focused = workspace
-                .as_ref()
-                .and_then(|w| w.get("is_focused"))
-                .and_then(Value::as_bool)
-                == Some(true);
             let focus_timestamp = workspace_id.and_then(|id| latest.get(&id).copied());
             WorktreeRow {
                 path: row.path,
@@ -471,28 +466,42 @@ fn worktree_rows(
                 remote_branch: row.remote_branch,
                 workspace,
                 windows,
-                is_focused,
+                is_merged_into_default_branch: row.is_merged_into_default_branch,
                 focus_timestamp,
+                commit_timestamp: row.commit_timestamp,
             }
         })
         .collect();
+    sort_worktree_rows(&mut rows);
+    Ok(rows)
+}
+
+fn sort_worktree_rows(rows: &mut [WorktreeRow]) {
+    let is_focused = |row: &WorktreeRow| {
+        row.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.get("is_focused"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    };
     rows.sort_by(|a, b| {
         (
-            b.is_focused,
+            is_focused(b),
             b.focus_timestamp.is_some(),
             b.focus_timestamp,
+            b.commit_timestamp,
             &b.repo,
             &b.path,
         )
             .cmp(&(
-                a.is_focused,
+                is_focused(a),
                 a.focus_timestamp.is_some(),
                 a.focus_timestamp,
+                a.commit_timestamp,
                 &a.repo,
                 &a.path,
             ))
     });
-    Ok(rows)
 }
 
 fn branches_for_repo(
@@ -521,7 +530,7 @@ fn branches_for_repo(
             rows.push(BranchRow {
                 local_branch: Some(branch.clone()),
                 remote_branch,
-                is_merged_into_default_branch: false,
+                is_merged_into_default_branch: None,
                 repo: repo.path.clone(),
                 workspace_id: worktree.as_ref().and_then(|path| workspace_ids.get(path).copied()),
                 worktree,
@@ -542,7 +551,7 @@ fn branches_for_repo(
             rows.push(BranchRow {
                 local_branch: Some(branch.clone()),
                 remote_branch: Some(upstream),
-                is_merged_into_default_branch: false,
+                is_merged_into_default_branch: None,
                 repo: repo.path.clone(),
                 workspace_id: worktree.as_ref().and_then(|path| workspace_ids.get(path).copied()),
                 worktree,
@@ -559,7 +568,7 @@ fn branches_for_repo(
             }
             rows.push(BranchRow {
                 local_branch: None,
-                is_merged_into_default_branch: false,
+                is_merged_into_default_branch: None,
                 remote_branch: Some(branch),
                 repo: repo.path.clone(),
                 worktree: None,
@@ -577,13 +586,12 @@ fn branches_with_merge_status_for_repo(
     remote_only: bool,
     workspace_ids: &HashMap<PathBuf, u64>,
 ) -> Result<Vec<BranchRow>> {
-    let default_branch = git::default_origin_branch(runner, &repo.path)?;
-    let merged_branches = git::branches_merged_into(runner, &repo.path, &default_branch)?;
     let mut rows = branches_for_repo(runner, repo, local_only, remote_only, workspace_ids)?;
+    let merged_branches = git::branches_merged_into_default(runner, &repo.path);
     for row in &mut rows {
         let branch = row.local_branch.as_ref().or(row.remote_branch.as_ref());
         row.is_merged_into_default_branch =
-            branch.is_some_and(|branch| merged_branches.contains(branch));
+            branch.and_then(|branch| merged_branches.as_ref().and_then(|info| info.status(branch)));
     }
     Ok(rows)
 }
@@ -609,7 +617,7 @@ fn pull_requests_for_repo(
             None if pr.status.as_deref() == Some("OPEN") => BranchRow {
                 local_branch: Some(pr.head_ref_name.clone()),
                 remote_branch: None,
-                is_merged_into_default_branch: false,
+                is_merged_into_default_branch: None,
                 repo: repo.path.clone(),
                 worktree: None,
                 workspace_id: None,
@@ -697,11 +705,10 @@ fn worktree_path_for_repo_branch(runner: &dyn CommandRunner, repo: &Repo, branch
 }
 
 fn remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> std::result::Result<(), CommandError> {
-    let entry = if let Some(workspace_id) = args.workspace_id {
-        env.store()
-            .load_worktrees()
-            .map_err(command_from_app)?
-            .into_iter()
+    let mappings = env.store().load_worktrees().map_err(command_from_app)?;
+    let (worktree, workspace_id) = if let Some(workspace_id) = args.workspace_id {
+        let entry = mappings
+            .iter()
             .find(|entry| entry.workspace_id == workspace_id)
             .ok_or_else(|| {
                 CommandError::new(
@@ -710,56 +717,66 @@ fn remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> std::result::Res
                 )
                 .details(json!({ "workspace_id": workspace_id }))
                 .json(args.json)
-            })?
+            })?;
+        (entry.path.clone(), Some(workspace_id))
     } else {
         let worktree = normalize_path(args.worktree.as_deref().unwrap_or_default());
-        env.store()
-            .load_worktrees()
-            .map_err(command_from_app)?
-            .into_iter()
+        let workspace_id = mappings
+            .iter()
             .find(|entry| entry.path == worktree)
-            .ok_or_else(|| {
-                CommandError::new(
-                    "worktree_not_stored",
-                    format!("No workspace is stored for worktree {}", worktree.display()),
-                )
-                .details(json!({ "worktree": worktree }))
-                .json(args.json)
-            })?
+            .map(|entry| entry.workspace_id);
+        (worktree, workspace_id)
     };
 
-    if !entry.path.is_dir() {
+    if !worktree.is_dir() {
         return Err(CommandError::new(
             "worktree_missing",
-            format!("Worktree directory does not exist: {}", entry.path.display()),
+            format!("Worktree directory does not exist: {}", worktree.display()),
         )
-        .details(json!({"worktree": entry.path, "workspace_id": entry.workspace_id}))
+        .details(json!({"worktree": worktree, "workspace_id": workspace_id}))
         .json(args.json));
     }
 
-    ensure_workspace_has_no_windows(env.niri(), entry.workspace_id, args.json)?;
-    ensure_worktree_clean(env.runner(), &entry.path, args.json)?;
-    let repo = stored_repo_for_worktree(env, &entry.path)
+    if let Some(workspace_id) = workspace_id {
+        ensure_workspace_has_no_windows(env.niri(), workspace_id, args.json)?;
+    }
+    ensure_worktree_clean(env.runner(), &worktree, args.json)?;
+    let repo = stored_repo_for_worktree(env, &worktree)
         .map_err(command_from_app)?
         .ok_or_else(|| {
             CommandError::new(
                 "repo_not_stored",
-                format!("No stored repo was found for worktree {}", entry.path.display()),
+                format!("No stored repo was found for worktree {}", worktree.display()),
             )
-            .details(json!({"worktree": entry.path, "workspace_id": entry.workspace_id}))
+            .details(json!({"worktree": worktree, "workspace_id": workspace_id}))
             .json(args.json)
         })?;
-    run_teardown(env.runner(), &repo, &entry.path).map_err(|mut err| {
+    // A shared Git common directory alone also matches subdirectories. Explicit
+    // paths must name a registered worktree root before running teardown.
+    if args.worktree.is_some()
+        && !git::worktrees(env.runner(), &repo)
+            .map_err(command_from_app)?
+            .iter()
+            .any(|entry| entry.path == worktree)
+    {
+        return Err(CommandError::new(
+            "worktree_not_registered",
+            format!("Not a registered worktree: {}", worktree.display()),
+        )
+        .details(json!({"worktree": worktree, "repo": repo.path}))
+        .json(args.json));
+    }
+    run_teardown(env.runner(), &repo, &worktree).map_err(|mut err| {
         err.json = args.json;
         err
     })?;
-    let out = git::remove_worktree(env.runner(), &repo.path, &entry.path).map_err(command_from_app)?;
+    let out = git::remove_worktree(env.runner(), &repo.path, &worktree).map_err(command_from_app)?;
     if out.status != 0 {
         return Err(CommandError::new(
             "git_worktree_remove_failed",
             format!(
                 "Could not remove worktree {}{}",
-                entry.path.display(),
+                worktree.display(),
                 if out.stderr.trim().is_empty() {
                     String::new()
                 } else {
@@ -768,11 +785,11 @@ fn remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> std::result::Res
             ),
         )
         .exit_code(13)
-        .details(json!({"worktree": entry.path, "repo": repo.path, "stderr": out.stderr.trim()}))
+        .details(json!({"worktree": worktree, "repo": repo.path, "stderr": out.stderr.trim()}))
         .json(args.json));
     }
     let mut mappings = env.store().load_worktrees().map_err(command_from_app)?;
-    mappings.retain(|mapping| mapping.path != entry.path);
+    mappings.retain(|mapping| mapping.path != worktree);
     env.store()
         .save_worktrees(&mappings)
         .map_err(command_from_app)?;
@@ -882,6 +899,24 @@ fn command_from_app(err: AppError) -> CommandError {
 mod tests {
     use super::*;
 
+    fn worktree_row(
+        path: &str,
+        focus_timestamp: Option<(i64, i64)>,
+        commit_timestamp: Option<i64>,
+    ) -> WorktreeRow {
+        WorktreeRow {
+            path: PathBuf::from(path),
+            repo: PathBuf::from("/repo"),
+            local_branch: None,
+            remote_branch: None,
+            workspace: None,
+            windows: vec![],
+            is_merged_into_default_branch: None,
+            focus_timestamp,
+            commit_timestamp,
+        }
+    }
+
     fn pull_request_row(pr_number: u64, workspace_id: Option<u64>) -> PullRequestRow {
         PullRequestRow {
             pr_number: Some(pr_number),
@@ -901,6 +936,79 @@ mod tests {
     fn branch_pr_name_strips_remote_prefix() {
         assert_eq!(branch_pr_name("origin/feature"), "feature");
         assert_eq!(branch_pr_name("feature"), "feature");
+    }
+
+    #[test]
+    fn worktrees_use_commit_time_only_after_workspace_activity() {
+        let mut rows = vec![
+            worktree_row("/no-workspace-old", None, Some(100)),
+            worktree_row("/workspace-old", Some((10, 0)), Some(50)),
+            worktree_row("/no-workspace-new", None, Some(400)),
+            worktree_row("/workspace-new", Some((20, 0)), Some(25)),
+        ];
+
+        sort_worktree_rows(&mut rows);
+
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_path()).collect::<Vec<_>>(),
+            vec![
+                Path::new("/workspace-new"),
+                Path::new("/workspace-old"),
+                Path::new("/no-workspace-new"),
+                Path::new("/no-workspace-old"),
+            ]
+        );
+    }
+
+    #[test]
+    fn worktrees_promote_focused_workspace_without_reordering_other_rows() {
+        for focus_timestamp in [None, Some((1, 0))] {
+            let mut rows = vec![
+                worktree_row("/no-commit", None, None),
+                worktree_row("/path-a", Some((10, 0)), Some(100)),
+                worktree_row("/empty-workspace", None, Some(500)),
+                worktree_row("/newer-commit", Some((10, 0)), Some(200)),
+                worktree_row("/path-z", Some((10, 0)), Some(100)),
+                worktree_row("/newer-activity", Some((10, 1)), Some(1)),
+                worktree_row("/other-repo", Some((10, 0)), Some(100)),
+                worktree_row("/current", focus_timestamp, Some(0)),
+            ];
+            rows[2].workspace = Some(json!({"id": 1, "is_active": true, "is_focused": false}));
+            rows[6].repo = PathBuf::from("/repo-z");
+            // Missing focus metadata must behave like an unfocused workspace.
+            rows[7].workspace = Some(json!({"id": 2}));
+            sort_worktree_rows(&mut rows);
+            let paths =
+                |rows: &[WorktreeRow]| rows.iter().map(|row| row.path.clone()).collect::<Vec<_>>();
+            let expected_others: Vec<PathBuf> = [
+                "/newer-activity",
+                "/newer-commit",
+                "/other-repo",
+                "/path-z",
+                "/path-a",
+                "/empty-workspace",
+                "/no-commit",
+            ]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+            let current_index = rows
+                .iter()
+                .position(|row| row.path == Path::new("/current"))
+                .unwrap();
+            assert_eq!(current_index, if focus_timestamp.is_some() { 5 } else { 6 });
+            let baseline_others: Vec<_> = paths(&rows)
+                .into_iter()
+                .filter(|path| path != Path::new("/current"))
+                .collect();
+            assert_eq!(baseline_others, expected_others);
+
+            rows[current_index].workspace = Some(json!({"id": 2, "is_focused": true}));
+            sort_worktree_rows(&mut rows);
+            assert_eq!(rows[0].path, Path::new("/current"));
+            assert!(rows[0].windows.is_empty());
+            assert_eq!(paths(&rows[1..]), baseline_others);
+        }
     }
 
     #[test]

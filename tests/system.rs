@@ -105,6 +105,12 @@ impl TestEnv {
 fn git_mock() -> &'static str {
     r#"#!/bin/sh
 args="$*"
+if [ -n "$GIT_CALL_LOG" ]; then echo "$args" >> "$GIT_CALL_LOG"; fi
+case "$args" in
+  *"--merged="*)
+    if [ "$GIT_MOCK_NO_DEFAULT" = "1" ]; then exit 1; fi
+    ;;
+esac
 case "$args" in
   *"rev-parse --git-dir"*) exit 0 ;;
   *"rev-parse --path-format=absolute --git-common-dir"*) echo "/tmp/common.git"; exit 0 ;;
@@ -114,15 +120,28 @@ case "$args" in
     echo "origin/main"
     exit 0
     ;;
-  *"for-each-ref --format=%(refname:short) --merged=origin/main refs/heads refs/remotes"*)
-    echo "main"
-    echo "origin/main"
-    echo "origin/orphan"
+  *"for-each-ref --format=%(refname:short)%09%(symref:short) --merged=refs/remotes/origin/HEAD refs/heads refs/remotes"*)
+    if [ "$GIT_MOCK_NO_ORIGIN_HEAD" = "1" ]; then exit 1; fi
+    printf 'main\t\n'
+    printf 'merged-feature\t\n'
+    printf 'origin/orphan\t\n'
+    printf 'origin/main\t\n'
+    printf 'origin/HEAD\torigin/main\n'
     exit 0
     ;;
-  *"for-each-ref --format=%(refname:short) --merged=origin/master refs/heads refs/remotes"*)
-    echo "master"
-    echo "origin/master"
+  *"for-each-ref --format=%(refname:short)%09%(symref:short) --merged=origin/main refs/heads refs/remotes"*)
+    if [ "$GIT_MOCK_DEFAULT_MASTER" = "1" ]; then exit 1; fi
+    printf 'main\t\n'
+    printf 'merged-feature\t\n'
+    printf 'origin/orphan\t\n'
+    printf 'origin/main\t\n'
+    exit 0
+    ;;
+  *"for-each-ref --format=%(refname:short)%09%(symref:short) --merged=origin/master refs/heads refs/remotes"*)
+    printf 'master\t\n'
+    printf 'merged-feature\t\n'
+    printf 'origin/orphan\t\n'
+    printf 'origin/main\t\n'
     exit 0
     ;;
   *"worktree list --porcelain"*)
@@ -136,9 +155,18 @@ case "$args" in
     echo
     echo "worktree $base/feature"
     echo "branch refs/heads/feature"
+    echo
+    echo "worktree $base/merged-feature"
+    echo "branch refs/heads/merged-feature"
     exit 0
     ;;
   *"for-each-ref --format=%(refname:short) refs/heads"*) echo "main"; echo "feature"; exit 0 ;;
+  *"for-each-ref --format=%(refname:short)%09%(upstream:short)%09%(committerdate:unix) refs/heads"*)
+    printf 'main\torigin/main\t100\n'
+    printf 'feature\torigin/feature\t200\n'
+    printf 'merged-feature\torigin/merged-feature\t150\n'
+    exit 0
+    ;;
   *"for-each-ref --format=%(refname:short) refs/remotes"*)
     echo "origin"
     if [ "$GIT_MOCK_DEFAULT_MASTER" = "1" ]; then echo "origin/master"; else echo "origin/main"; fi
@@ -182,6 +210,10 @@ exit 0
 }
 
 fn start_niri_socket(path: &Path) -> std::io::Result<()> {
+    start_niri_socket_with_windows(path, json!([]))
+}
+
+fn start_niri_socket_with_windows(path: &Path, windows: serde_json::Value) -> std::io::Result<()> {
     let _ = fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     thread::spawn(move || {
@@ -204,7 +236,7 @@ fn start_niri_socket(path: &Path) -> std::io::Result<()> {
                          "active_window_id": null}
                     ]}
                 }),
-                serde_json::Value::String(ref s) if s == "Windows" => json!({"Ok": {"Windows": []}}),
+                serde_json::Value::String(ref s) if s == "Windows" => json!({"Ok": {"Windows": windows}}),
                 _ => json!({"Ok": "Handled"}),
             };
             writeln!(stream, "{reply}").unwrap();
@@ -625,6 +657,51 @@ fn list_branches_json_uses_git_mocks() {
 }
 
 #[test]
+fn list_branches_keeps_rows_when_default_is_unresolved() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+
+    let output = env.cmd()
+        .env("GIT_MOCK_NO_DEFAULT", "1")
+        .args(["list-branches", "--json"])
+        .output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["branches"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row["is_merged_into_default_branch"].is_null()));
+
+    env.cmd()
+        .env("GIT_MOCK_NO_DEFAULT", "1")
+        .args(["list-branches"])
+        .assert().success()
+        .stdout(predicate::str::contains("feature"))
+        .stdout(predicate::str::contains("false").not());
+}
+
+#[test]
+fn list_branches_omits_default_merge_status_and_uses_one_bulk_query() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+    let log = env.temp.path().join("git-calls.log");
+    let output = env.cmd()
+        .env("GIT_CALL_LOG", &log)
+        .args(["list-branches", "--json", "--repo"])
+        .arg(env.repo_path())
+        .output().unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["branches"].as_array().unwrap();
+    let main = rows.iter().find(|row| row["local_branch"] == "main").unwrap();
+    assert!(main["is_merged_into_default_branch"].is_null());
+    let calls = fs::read_to_string(log).unwrap();
+    assert_eq!(calls.lines().filter(|line| line.contains("--merged=")).count(), 1);
+}
+
+#[test]
 fn list_branches_table_includes_merged_status() {
     let env = TestEnv::new();
     env.write_stores();
@@ -695,14 +772,330 @@ fn list_worktrees_json_uses_niri_socket_and_git_mocks() {
         panic!("failed to start fake niri socket: {err}");
     }
 
-    env.cmd()
+    let output = env
+        .cmd()
         .env("NIRI_SOCKET", socket)
         .args(["list-worktrees", "--json", "--repo"])
         .arg(env.repo_path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["worktrees"].as_array().unwrap();
+    let merge_status = |branch: &str| {
+        rows.iter()
+            .find(|row| row["local_branch"] == branch)
+            .unwrap()["is_merged_into_default_branch"]
+            .clone()
+    };
+    assert_eq!(merge_status("main"), serde_json::Value::Null);
+    assert_eq!(merge_status("feature"), false);
+    assert_eq!(merge_status("merged-feature"), true);
+    assert!(rows.iter().any(|row| row["workspace"]["id"] == 2));
+}
+
+#[test]
+fn list_worktrees_promotes_empty_focused_workspace_and_preserves_other_order() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+    let socket_dir = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = socket_dir.path().join("niri.sock");
+    start_niri_socket(&socket).unwrap();
+
+    // The oldest worktree is mapped to the focused workspace, which has no windows.
+    fs::write(
+        env.runtime.join("niri-worktrees/worktrees.json"),
+        serde_json::to_string(&json!({"worktrees": [
+            {"path": env.repo_path(), "workspace_id": 2},
+            {"path": env.worktree_path(), "workspace_id": 1}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = env
+        .cmd()
+        .env("NIRI_SOCKET", &socket)
+        .args(["list-worktrees", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["worktrees"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["local_branch"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["main", "feature", "merged-feature"]
+    );
+    assert_eq!(rows[0]["workspace"]["is_focused"], true);
+    assert_eq!(rows[0]["windows"], json!([]));
+
+    // If the focused workspace has no mapping, retain the original commit ordering.
+    env.write_stores();
+    fs::write(
+        env.runtime.join("niri-worktrees/worktrees.json"),
+        serde_json::to_string(&json!({"worktrees": [
+            {"path": env.worktree_path(), "workspace_id": 1}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = env
+        .cmd()
+        .env("NIRI_SOCKET", &socket)
+        .args(["list-worktrees", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["worktrees"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["local_branch"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["feature", "merged-feature", "main"]
+    );
+}
+
+#[test]
+fn list_worktrees_uses_one_bulk_merge_query_per_repo() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+    let log = env.temp.path().join("git-calls.log");
+    let socket_dir = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = socket_dir.path().join("niri.sock");
+    if let Err(err) = start_niri_socket(&socket) {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            return;
+        }
+        panic!("failed to start fake niri socket: {err}");
+    }
+
+    env.cmd()
+        .env("NIRI_SOCKET", socket)
+        .env("GIT_CALL_LOG", &log)
+        .args(["list-worktrees", "--json", "--repo"])
+        .arg(env.repo_path())
         .assert()
-        .success()
-        .stdout(predicate::str::contains("\"workspaces\"").not())
-        .stdout(predicate::str::contains("\"workspace\""))
-        .stdout(predicate::str::contains("\"windows\""))
-        .stdout(predicate::str::contains("\"id\": 2"));
+        .success();
+
+    let calls = fs::read_to_string(log).unwrap();
+    assert_eq!(calls.lines().filter(|line| line.contains("--merged=")).count(), 1);
+}
+
+fn real_git(env: &TestEnv, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .env("HOME", &env.home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .arg("-C")
+        .arg(env.repo_path())
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn removal_fixture(mapped: bool) -> TestEnv {
+    let env = TestEnv::new();
+    env.write_stores();
+    real_git(&env, &["init", "--initial-branch=main"]);
+    real_git(
+        &env,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    );
+    real_git(
+        &env,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            env.worktree_path().to_str().unwrap(),
+        ],
+    );
+    if !mapped {
+        fs::remove_file(env.runtime.join("niri-worktrees/worktrees.json")).unwrap();
+    }
+    env
+}
+
+#[test]
+fn remove_unmapped_worktree_runs_teardown_and_removes_git_registration() {
+    let env = removal_fixture(false);
+    let log = env.temp.path().join("teardown.log");
+    env.write_exe("script-mock", script_mock());
+    fs::write(
+        env.data.join("niri-worktrees/repos.json"),
+        serde_json::to_vec(&json!({
+            "repos": [{"path": env.repo_path(), "teardown": ["script-mock", "teardown-arg"]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    env.cmd()
+        .env("NIRI_SOCKET", env.temp.path().join("absent.sock"))
+        .env("SCRIPT_MOCK_LOG", &log)
+        .args(["remove-worktree", "--json", "--worktree"])
+        .arg(env.worktree_path())
+        .assert()
+        .success();
+    assert!(!env.worktree_path().exists());
+    assert!(fs::read_to_string(log)
+        .unwrap()
+        .contains(&format!("{}:teardown-arg", env.worktree_path().display())));
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(env.repo_path())
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(env.worktree_path().to_str().unwrap())
+    );
+}
+
+#[test]
+fn remove_unmapped_worktree_preserves_safety_checks() {
+    for (case, exit_code, error) in [
+        ("dirty", 11, "worktree_dirty"),
+        ("missing", 1, "worktree_missing"),
+        ("unstored", 1, "repo_not_stored"),
+        ("subdirectory", 1, "worktree_not_registered"),
+        ("arbitrary", 1, "Could not check worktree status"),
+        ("teardown", 12, "teardown_failed"),
+        ("locked", 13, "git_worktree_remove_failed"),
+    ] {
+        let env = removal_fixture(false);
+        let mut target = env.worktree_path();
+        match case {
+            "dirty" => fs::write(target.join("untracked"), "keep me").unwrap(),
+            "missing" => target = env.temp.path().join("missing"),
+            "unstored" => fs::write(
+                env.data.join("niri-worktrees/repos.json"),
+                r#"{"repos":[]}"#,
+            )
+            .unwrap(),
+            "subdirectory" => {
+                target = target.join("nested");
+                fs::create_dir(&target).unwrap();
+            }
+            "arbitrary" => {
+                target = env.temp.path().join("arbitrary");
+                fs::create_dir(&target).unwrap();
+            }
+            "teardown" => {
+                env.write_exe("fail-teardown", "#!/bin/sh\nexit 42\n");
+                fs::write(
+                    env.data.join("niri-worktrees/repos.json"),
+                    serde_json::to_vec(&json!({
+                        "repos": [{"path": env.repo_path(), "teardown": ["fail-teardown"]}]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            "locked" => real_git(&env, &["worktree", "lock", target.to_str().unwrap()]),
+            _ => unreachable!(),
+        }
+        env.cmd()
+            .env("NIRI_SOCKET", env.temp.path().join("absent.sock"))
+            .args(["remove-worktree", "--json", "--worktree"])
+            .arg(&target)
+            .assert()
+            .code(exit_code)
+            .stderr(predicate::str::contains(error));
+        assert!(env.worktree_path().is_dir(), "{case} removed worktree");
+    }
+}
+
+#[test]
+fn remove_mapped_worktree_by_path_or_workspace_cleans_only_matching_mapping() {
+    for by_workspace in [false, true] {
+        let env = removal_fixture(true);
+        let store = env.runtime.join("niri-worktrees/worktrees.json");
+        let other = json!({"path": env.repo_path(), "workspace_id": 3});
+        fs::write(
+            &store,
+            serde_json::to_vec(&json!({"worktrees": [
+                {"path": env.worktree_path(), "workspace_id": 2}, other.clone()
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let socket_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = socket_dir.path().join("niri.sock");
+        start_niri_socket(&socket).unwrap();
+        let mut cmd = env.cmd();
+        cmd.env("NIRI_SOCKET", socket)
+            .args(["remove-worktree", "--json"]);
+        if by_workspace {
+            cmd.args(["--workspace-id", "2"]);
+        } else {
+            cmd.arg("--worktree").arg(env.worktree_path());
+        }
+        cmd.assert().success();
+        assert!(!env.worktree_path().exists());
+        let remaining: serde_json::Value =
+            serde_json::from_slice(&fs::read(store).unwrap()).unwrap();
+        assert_eq!(remaining["worktrees"], json!([other]));
+    }
+}
+
+#[test]
+fn remove_unknown_workspace_still_requires_mapping() {
+    let env = removal_fixture(false);
+    env.cmd()
+        .args(["remove-worktree", "--json", "--workspace-id", "2"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("worktree_not_stored"));
+    assert!(env.worktree_path().is_dir());
+}
+
+#[test]
+fn remove_mapped_worktree_still_rejects_open_windows() {
+    for by_workspace in [false, true] {
+        let env = removal_fixture(true);
+        let store = env.runtime.join("niri-worktrees/worktrees.json");
+        let original = fs::read(&store).unwrap();
+        let socket_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = socket_dir.path().join("niri.sock");
+        start_niri_socket_with_windows(&socket, json!([{
+                "id": 7, "workspace_id": 2, "is_focused": false,
+                "is_floating": false, "is_urgent": false,
+                "layout": {"tile_size": [100.0, 100.0], "window_size": [100, 100],
+                           "window_offset_in_tile": [0.0, 0.0]}
+            }])).unwrap();
+        let mut cmd = env.cmd();
+        cmd.env("NIRI_SOCKET", socket)
+            .args(["remove-worktree", "--json"]);
+        if by_workspace {
+            cmd.args(["--workspace-id", "2"]);
+        } else {
+            cmd.arg("--worktree").arg(env.worktree_path());
+        }
+        cmd.assert()
+            .code(10)
+            .stderr(predicate::str::contains("workspace_has_windows"));
+        assert!(env.worktree_path().is_dir());
+        assert_eq!(fs::read(store).unwrap(), original);
+    }
 }
