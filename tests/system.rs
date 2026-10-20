@@ -1099,3 +1099,234 @@ fn remove_mapped_worktree_still_rejects_open_windows() {
         assert_eq!(fs::read(store).unwrap(), original);
     }
 }
+
+#[test]
+fn protected_paths_block_removal_before_teardown() {
+    for case in ["file", "nested", "directory", "symlink", "dangling"] {
+        let env = removal_fixture(false);
+        let target = env.worktree_path();
+        let name = if case == "nested" {
+            "local/mise.local.toml"
+        } else {
+            "mise.local.toml"
+        };
+        fs::write(
+            env.repo_path().join(".git/info/exclude"),
+            "mise.local.toml\nlocal/\n",
+        )
+        .unwrap();
+        match case {
+            "directory" => fs::create_dir(target.join(name)).unwrap(),
+            "symlink" | "dangling" => {
+                let destination = env.temp.path().join("secret");
+                if case == "symlink" {
+                    fs::write(&destination, "secret contents").unwrap();
+                }
+                std::os::unix::fs::symlink(destination, target.join(name)).unwrap();
+            }
+            _ => {
+                fs::create_dir_all(target.join(name).parent().unwrap()).unwrap();
+                fs::write(target.join(name), "secret contents").unwrap();
+            }
+        }
+        env.write_exe("teardown", "#!/bin/sh\ntouch teardown-ran\n");
+        fs::write(env.data.join("niri-worktrees/repos.json"), serde_json::to_vec(&json!({
+            "repos": [{"path": env.repo_path(), "protected_paths": [format!("./{name}/.")], "teardown": ["teardown"]}]
+        })).unwrap()).unwrap();
+        let output = env
+            .cmd()
+            .args(["remove-worktree", "--json", "--worktree"])
+            .arg(&target)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            error["error"]["code"], "worktree_protected_paths",
+            "{case}: {error}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("secret contents"));
+        assert!(target.is_dir());
+        assert!(!target.join("teardown-ran").exists());
+    }
+}
+
+#[test]
+fn protected_paths_created_by_teardown_block_removal() {
+    let env = removal_fixture(false);
+    fs::write(env.repo_path().join(".git/info/exclude"), ".envrc\n").unwrap();
+    env.write_exe("teardown", "#!/bin/sh\nprintf secret > .envrc\n");
+    fs::write(env.data.join("niri-worktrees/repos.json"), serde_json::to_vec(&json!({
+        "repos": [{"path": env.repo_path(), "protected_paths": [".envrc"], "teardown": ["teardown"]}]
+    })).unwrap()).unwrap();
+    env.cmd()
+        .args(["remove-worktree", "--json", "--worktree"])
+        .arg(env.worktree_path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("worktree_protected_paths"));
+    assert!(env.worktree_path().join(".envrc").exists());
+}
+
+#[test]
+fn absent_protected_paths_allow_removal() {
+    let env = removal_fixture(false);
+    fs::write(env.data.join("niri-worktrees/repos.json"), serde_json::to_vec(&json!({
+        "repos": [{"path": env.repo_path(), "protected_paths": ["mise.local.toml", "local/.envrc"]}]
+    })).unwrap()).unwrap();
+    env.cmd()
+        .args(["remove-worktree", "--json", "--worktree"])
+        .arg(env.worktree_path())
+        .assert()
+        .success();
+    assert!(!env.worktree_path().exists());
+}
+
+#[test]
+fn invalid_protected_paths_config_blocks_removal() {
+    for value in [
+        json!(null),
+        json!(".envrc"),
+        json!([42]),
+        json!(["../secret"]),
+        json!(["/secret"]),
+        json!([""]),
+        json!(["."]),
+    ] {
+        let env = removal_fixture(false);
+        fs::write(
+            env.data.join("niri-worktrees/repos.json"),
+            serde_json::to_vec(&json!({
+                "repos": [{"path": env.repo_path(), "protected_paths": value}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        env.cmd()
+            .args(["remove-worktree", "--json", "--worktree"])
+            .arg(env.worktree_path())
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Invalid protected"));
+        assert!(env.worktree_path().exists());
+    }
+}
+
+#[test]
+fn protected_paths_settings_replace_preserve_and_clear() {
+    let env = TestEnv::new();
+    fs::create_dir_all(env.repo_path()).unwrap();
+    env.write_exe("git", git_mock());
+    let saved = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(env.data.join("niri-worktrees/repos.json")).unwrap())
+            .unwrap()
+    };
+    env.cmd()
+        .args(["set-repo", "--repo"])
+        .arg(env.repo_path())
+        .args([
+            "--protected-path",
+            "mise.local.toml",
+            "--protected-path",
+            ".envrc",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        saved()["repos"][0]["protected_paths"],
+        json!(["mise.local.toml", ".envrc"])
+    );
+    env.cmd()
+        .args(["list-repos", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mise.local.toml"));
+    env.cmd()
+        .args(["set-repo", "--repo"])
+        .arg(env.repo_path())
+        .args(["--list-pull-requests", "true"])
+        .assert()
+        .success();
+    assert_eq!(
+        saved()["repos"][0]["protected_paths"],
+        json!(["mise.local.toml", ".envrc"])
+    );
+    env.cmd()
+        .args(["set-repo", "--repo"])
+        .arg(env.repo_path())
+        .args(["--protected-path", "local/.envrc"])
+        .assert()
+        .success();
+    assert_eq!(
+        saved()["repos"][0]["protected_paths"],
+        json!(["local/.envrc"])
+    );
+    env.cmd()
+        .args(["set-repo", "--repo"])
+        .arg(env.repo_path())
+        .args(["--protected-path", "../secret"])
+        .assert()
+        .failure();
+    assert_eq!(
+        saved()["repos"][0]["protected_paths"],
+        json!(["local/.envrc"])
+    );
+    env.cmd()
+        .args(["set-repo", "--repo"])
+        .arg(env.repo_path())
+        .arg("--clear-protected-paths")
+        .assert()
+        .success();
+    assert_eq!(saved()["repos"][0]["protected_paths"], json!([]));
+}
+
+#[test]
+fn protected_paths_block_mapped_workspace_removal_and_preserve_mapping() {
+    let env = removal_fixture(true);
+    fs::write(env.repo_path().join(".git/info/exclude"), ".envrc\n").unwrap();
+    fs::write(env.worktree_path().join(".envrc"), "secret").unwrap();
+    fs::write(
+        env.data.join("niri-worktrees/repos.json"),
+        serde_json::to_vec(&json!({
+            "repos": [{"path": env.repo_path(), "protected_paths": [".envrc"]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let socket_dir = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = socket_dir.path().join("niri.sock");
+    start_niri_socket(&socket).unwrap();
+    let mapping = env.runtime.join("niri-worktrees/worktrees.json");
+    let before = fs::read(&mapping).unwrap();
+    env.cmd()
+        .env("NIRI_SOCKET", socket)
+        .args(["remove-worktree", "--json", "--workspace-id", "2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("worktree_protected_paths"));
+    assert_eq!(fs::read(mapping).unwrap(), before);
+    assert!(env.worktree_path().exists());
+}
+
+#[test]
+fn protected_paths_inspection_errors_block_removal() {
+    let env = removal_fixture(false);
+    fs::write(env.repo_path().join(".git/info/exclude"), "loop\n").unwrap();
+    std::os::unix::fs::symlink("loop", env.worktree_path().join("loop")).unwrap();
+    fs::write(
+        env.data.join("niri-worktrees/repos.json"),
+        serde_json::to_vec(&json!({
+            "repos": [{"path": env.repo_path(), "protected_paths": ["loop/.envrc"]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    env.cmd()
+        .args(["remove-worktree", "--json", "--worktree"])
+        .arg(env.worktree_path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("protected_path_check_failed"));
+    assert!(env.worktree_path().exists());
+}

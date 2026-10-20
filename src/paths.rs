@@ -56,3 +56,24 @@ pub fn repos_store_path() -> PathBuf {
     }
 }
 
+/// Protected paths must stay beneath the worktree root and name an entry.
+pub fn validate_protected_paths(paths: &[String]) -> Result<()> {
+    for path in paths {
+        let candidate = Path::new(path);
+        if path.is_empty()
+            || path.contains('\0')
+            || !candidate
+                .components()
+                .any(|part| matches!(part, std::path::Component::Normal(_)))
+            || candidate.components().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return message(format!("Invalid protected path {path:?}: expected a non-empty worktree-relative path without '..'"));
+        }
+    }
+    Ok(())
+}

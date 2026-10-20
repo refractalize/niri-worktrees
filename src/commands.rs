@@ -288,6 +288,7 @@ fn cmd_remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> Result<()> {
 }
 
 fn cmd_set_repo(args: cli::SetRepo, env: &dyn Env) -> Result<()> {
+    crate::paths::validate_protected_paths(&args.protected_paths)?;
     let repo_path = repo_arg_or_default(env.runner(), args.repo.as_deref())?;
     if !git::is_git_repository(env.runner(), &repo_path) {
         return message(format!("{} is not a git repository", repo_path.display()));
@@ -297,12 +298,16 @@ fn cmd_set_repo(args: cli::SetRepo, env: &dyn Env) -> Result<()> {
         if let Some(list_pull_requests) = args.list_pull_requests {
             repo.list_pull_requests = bool::from(list_pull_requests);
         }
+        if args.clear_protected_paths || !args.protected_paths.is_empty() {
+            repo.protected_paths = args.protected_paths;
+        }
     } else {
         repos.push(Repo {
             path: repo_path,
             list_pull_requests: args.list_pull_requests.map(bool::from).unwrap_or(false),
             setup: None,
             teardown: None,
+            protected_paths: args.protected_paths,
         });
     }
     env.store().save_repos(&repos)
@@ -356,6 +361,7 @@ fn cmd_list_repos(args: cli::ListRepos, env: &dyn Env) -> Result<()> {
                     "list_pull_requests": repo.list_pull_requests,
                     "setup": repo.setup,
                     "teardown": repo.teardown,
+                    "protected_paths": repo.protected_paths,
                 })
             })
             .collect();
@@ -766,10 +772,12 @@ fn remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> std::result::Res
         .details(json!({"worktree": worktree, "repo": repo.path}))
         .json(args.json));
     }
+    ensure_no_protected_paths(&repo, &worktree, args.json)?;
     run_teardown(env.runner(), &repo, &worktree).map_err(|mut err| {
         err.json = args.json;
         err
     })?;
+    ensure_no_protected_paths(&repo, &worktree, args.json)?;
     let out = git::remove_worktree(env.runner(), &repo.path, &worktree).map_err(command_from_app)?;
     if out.status != 0 {
         return Err(CommandError::new(
@@ -794,6 +802,46 @@ fn remove_worktree(args: cli::RemoveWorktree, env: &dyn Env) -> std::result::Res
         .save_worktrees(&mappings)
         .map_err(command_from_app)?;
     Ok(())
+}
+
+fn ensure_no_protected_paths(
+    repo: &Repo,
+    worktree: &Path,
+    json_output: bool,
+) -> std::result::Result<(), CommandError> {
+    crate::paths::validate_protected_paths(&repo.protected_paths).map_err(command_from_app)?;
+    let mut present = Vec::new();
+    for relative in &repo.protected_paths {
+        // lstat also protects dangling symlinks. Do not inspect file contents.
+        // Normalize './' and trailing separators without resolving symlinks.
+        let relative_path: PathBuf = Path::new(relative)
+            .components()
+            .filter(|part| matches!(part, std::path::Component::Normal(_)))
+            .collect();
+        let path = worktree.join(relative_path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => present.push(relative.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CommandError::new(
+                    "protected_path_check_failed",
+                    format!("Could not check protected path {relative:?}: {error}"),
+                )
+                .details(json!({"worktree": worktree, "path": relative}))
+                .json(json_output))
+            }
+        }
+    }
+    if present.is_empty() {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            "worktree_protected_paths",
+            format!("Worktree contains protected paths: {}", present.join(", ")),
+        )
+        .details(json!({"worktree": worktree, "paths": present}))
+        .json(json_output))
+    }
 }
 
 fn ensure_workspace_has_no_windows(

@@ -18,6 +18,8 @@ pub struct Repo {
     pub path: PathBuf,
     #[serde(default)]
     pub list_pull_requests: bool,
+    #[serde(default)]
+    pub protected_paths: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -114,6 +114,12 @@ pub struct SetRepo {
     pub repo: Option<String>,
     #[arg(long)]
     pub list_pull_requests: Option<BoolArg>,
+    /// Replace protected paths (repeat for each exact worktree-relative path).
+    #[arg(long = "protected-path", conflicts_with = "clear_protected_paths")]
+    pub protected_paths: Vec<String>,
+    /// Remove all configured protected paths.
+    #[arg(long)]
+    pub clear_protected_paths: bool,
 }
 
 #[derive(Debug, Args)]

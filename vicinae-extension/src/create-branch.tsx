@@ -193,6 +193,7 @@ export default function CreateBranch() {
       </Form.Dropdown>
       <Form.TextField
         id="branch"
+        autoFocus
         title="Branch Name"
         placeholder="my-feature"
         value={branchValue}

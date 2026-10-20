@@ -46,6 +46,7 @@
     "build": "vici build",
     "dev": "vici develop",
     "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.cjs",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "format": "prettier --write src/**/*.{ts,tsx}",

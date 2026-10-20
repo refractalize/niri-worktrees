@@ -50,7 +50,7 @@ impl Store for FileStore {
         let mut out = vec![];
         if let Some(entries) = value.get("repos").and_then(Value::as_array) {
             for entry in entries {
-                if let Some(repo) = normalize_repo(entry) {
+                if let Some(repo) = normalize_repo(entry)? {
                     out.push(repo);
                 }
             }
@@ -74,7 +74,7 @@ impl FileStore {
         let mut out = vec![];
         if let Some(entries) = value.get("repos").and_then(Value::as_array) {
             for entry in entries {
-                if let Some(repo) = normalize_repo(entry) {
+                if let Some(repo) = normalize_repo(entry)? {
                     out.push(repo);
                 }
             }
@@ -135,15 +135,32 @@ fn normalize_mapping(value: &Value) -> Option<WorktreeMapping> {
     })
 }
 
-fn normalize_repo(value: &Value) -> Option<Repo> {
-    let obj = value.as_object()?;
-    let path = obj.get("path")?.as_str()?;
-    Some(Repo {
+fn normalize_repo(value: &Value) -> Result<Option<Repo>> {
+    let Some(obj) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(path) = obj.get("path").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let protected_paths = match obj.get("protected_paths") {
+        None => Vec::new(),
+        Some(value) => command_array(value).ok_or_else(|| {
+            AppError::Message(format!(
+                "Invalid protected_paths for {path}: expected an array of strings"
+            ))
+        })?,
+    };
+    crate::paths::validate_protected_paths(&protected_paths)?;
+    Ok(Some(Repo {
         path: normalize_path(path),
-        list_pull_requests: obj.get("list_pull_requests").and_then(Value::as_bool).unwrap_or(false),
+        list_pull_requests: obj
+            .get("list_pull_requests")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        protected_paths,
         setup: obj.get("setup").and_then(command_array),
         teardown: obj.get("teardown").and_then(command_array),
-    })
+    }))
 }
 
 fn command_array(value: &Value) -> Option<Vec<String>> {
@@ -213,7 +230,7 @@ mod tests {
     #[test]
     fn normalizes_repo_defaults_list_pull_requests_false() {
         let value = serde_json::json!({"path": "/tmp/repo"});
-        assert!(!normalize_repo(&value).unwrap().list_pull_requests);
+        assert!(!normalize_repo(&value).unwrap().unwrap().list_pull_requests);
     }
 
     #[test]

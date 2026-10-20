@@ -82,6 +82,8 @@ export async function withProgressToast(
 const REMOVE_ERROR_TITLES: Record<string, string> = {
   workspace_has_windows: 'Workspace still has open windows',
   worktree_dirty: 'Worktree has uncommitted changes',
+  worktree_protected_paths: 'Worktree contains protected files',
+  protected_path_check_failed: 'Could not check protected files',
   teardown_failed: 'Teardown command failed',
   git_worktree_remove_failed: 'git worktree remove failed',
 };
@@ -89,25 +91,30 @@ const REMOVE_ERROR_TITLES: Record<string, string> = {
 function parseRemoveError(error: unknown): { title: string; message: string } {
   const stderr =
     typeof error === 'object' && error !== null && 'stderr' in error
-      ? String((error as { stderr: unknown }).stderr)
-      : null;
+      ? String((error as { stderr: unknown }).stderr ?? '')
+      : '';
+  const fallback = error instanceof Error ? error.message : String(error);
 
-  if (stderr) {
+  // Some process errors include the command prefix or teardown output alongside JSON.
+  for (const text of [stderr, fallback]) {
+    const start = text.search(/\{\s*"error"\s*:/);
+    if (start === -1) continue;
     try {
-      const parsed = JSON.parse(stderr) as { error?: { code?: string; message?: string } };
-      const code = parsed.error?.code ?? '';
-      const message = parsed.error?.message ?? stderr;
-      const title = REMOVE_ERROR_TITLES[code] ?? 'Failed to remove worktree';
-      return { title, message };
+      const parsed: unknown = JSON.parse(text.slice(start, text.lastIndexOf('}') + 1));
+      if (typeof parsed !== 'object' || parsed === null || !('error' in parsed)) continue;
+      const detail = parsed.error;
+      if (typeof detail !== 'object' || detail === null || !('message' in detail)) continue;
+      if (typeof detail.message !== 'string') continue;
+      const code = 'code' in detail && typeof detail.code === 'string' ? detail.code : '';
+      return {
+        title: REMOVE_ERROR_TITLES[code] ?? 'Failed to remove worktree',
+        message: detail.message,
+      };
     } catch {
-      return { title: 'Failed to remove worktree', message: stderr };
+      // Preserve plain stderr if it is not a structured CLI error.
     }
   }
-
-  return {
-    title: 'Failed to remove worktree',
-    message: error instanceof Error ? error.message : String(error),
-  };
+  return { title: 'Failed to remove worktree', message: stderr || fallback };
 }
 
 export async function removeWorktree(path: string): Promise<boolean> {
@@ -126,9 +133,10 @@ export async function removeWorktree(path: string): Promise<boolean> {
     return true;
   } catch (error) {
     const { title, message } = parseRemoveError(error);
-    toast.style = Toast.Style.Failure;
-    toast.title = title;
-    toast.message = message;
+    // The API's message setter does not refresh an existing toast. Send both
+    // fields together so the CLI explanation is visible on the first render.
+    await toast.hide();
+    await showToast({ style: Toast.Style.Failure, title, message });
     return false;
   }
 }
