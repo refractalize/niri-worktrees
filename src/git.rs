@@ -43,6 +43,15 @@ pub fn worktree_root(runner: &dyn CommandRunner, path: &Path) -> Option<PathBuf>
     (!stdout.is_empty()).then(|| normalize_path(stdout))
 }
 
+pub fn current_branch(runner: &dyn CommandRunner, worktree: &Path) -> Option<String> {
+    let out = git(runner, worktree, &["symbolic-ref", "--short", "-q", "HEAD"]).ok()?;
+    if out.status != 0 {
+        return None;
+    }
+    let stdout = out.stdout.trim();
+    (!stdout.is_empty()).then(|| stdout.to_string())
+}
+
 pub fn default_repo_path(runner: &dyn CommandRunner) -> Result<PathBuf> {
     let cwd = std::env::current_dir()
         .map_err(|e| AppError::Message(format!("Could not get current directory: {e}")))?;
@@ -399,6 +408,15 @@ pub fn status_porcelain(runner: &dyn CommandRunner, worktree: &Path) -> Result<S
         ));
     }
     Ok(out.stdout.trim().to_string())
+}
+
+pub fn commits_ahead(runner: &dyn CommandRunner, worktree: &Path, base: &str) -> Option<u64> {
+    let range = format!("{base}..HEAD");
+    let out = git(runner, worktree, &["rev-list", "--count", &range]).ok()?;
+    if out.status != 0 {
+        return None;
+    }
+    out.stdout.trim().parse().ok()
 }
 
 pub fn remove_worktree(runner: &dyn CommandRunner, repo: &Path, worktree: &Path) -> Result<crate::process::CmdOutput> {

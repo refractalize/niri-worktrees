@@ -17,3 +17,12 @@ run = [
 [tasks.test]
 description = "Run Rust tests"
 run = "cargo test"
+
+[tasks.install-dms-plugin]
+description = "Install the DankMaterialShell bar widget"
+run = '''
+dest="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/NiriWorktrees"
+rm -rf "$dest"
+mkdir -p "$(dirname "$dest")"
+cp -r dms-plugin/NiriWorktrees "$dest"
+'''

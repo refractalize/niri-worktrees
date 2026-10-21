@@ -16,6 +16,7 @@ pub enum Command {
     SetWorkspace(SetWorkspace),
     UnsetWorkspace(UnsetWorkspace),
     GetWorktree(GetWorktree),
+    WorktreeStatus(WorktreeStatus),
     FocusWorktree(FocusWorktree),
     CreateWorktree(CreateWorktree),
     CreateBranch(CreateBranch),
@@ -75,6 +76,17 @@ pub struct UnsetWorkspace {
 pub struct GetWorktree {
     #[arg(long)]
     pub workspace_id: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct WorktreeStatus {
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long)]
+    pub workspace_id: Option<u64>,
+    /// Skip the GitHub pull request lookup.
+    #[arg(long)]
+    pub no_pull_request: bool,
 }
 
 #[derive(Debug, Args)]

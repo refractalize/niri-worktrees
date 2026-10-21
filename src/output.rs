@@ -1,4 +1,4 @@
-use crate::models::{BranchRow, PullRequestRow, Repo, WorktreeRow};
+use crate::models::{BranchRow, PullRequestRow, Repo, WorktreeRow, WorktreeStatusRow};
 use comfy_table::{presets::UTF8_BORDERS_ONLY, Cell, Table};
 use serde_json::json;
 
@@ -104,6 +104,27 @@ pub fn print_pull_requests(rows: &[PullRequestRow]) {
         ]);
     }
     println!("{table}");
+}
+
+pub fn print_worktree_status(row: &WorktreeStatusRow) {
+    let mut parts = vec![row.name.clone()];
+    if let Some(ahead) = row.commits_ahead_of_default_branch.filter(|count| *count > 0) {
+        parts.push(format!("{ahead} ahead"));
+    }
+    if row.is_dirty == Some(true) {
+        parts.push("dirty".to_string());
+    }
+    if let Some(pr) = &row.pull_request {
+        if let Some(number) = pr.pr_number {
+            parts.push(format!("#{number}"));
+        }
+        parts.extend(pr.status.clone());
+        parts.extend(pr.checks_status.clone());
+        if let Some(unresolved) = pr.unresolved_review_comments.filter(|count| *count > 0) {
+            parts.push(format!("{unresolved} unresolved"));
+        }
+    }
+    println!("{}", parts.join(" "));
 }
 
 pub fn print_repos(rows: &[(Repo, Option<String>, bool)]) {

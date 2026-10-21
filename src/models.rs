@@ -66,6 +66,28 @@ pub struct PullRequestRow {
     pub workspace_id: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeStatusRow {
+    pub path: PathBuf,
+    pub name: String,
+    pub repo: Option<PathBuf>,
+    pub local_branch: Option<String>,
+    pub default_branch: Option<String>,
+    pub commits_ahead_of_default_branch: Option<u64>,
+    pub is_dirty: Option<bool>,
+    pub workspace_id: u64,
+    pub pull_request: Option<PullRequestStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PullRequestStatus {
+    pub pr_number: Option<u64>,
+    pub status: Option<String>,
+    pub unresolved_review_comments: Option<u64>,
+    pub total_review_comments: Option<u64>,
+    pub checks_status: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeRow {
     pub path: PathBuf,

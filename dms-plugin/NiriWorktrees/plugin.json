@@ -1,0 +1,14 @@
+{
+    "id": "niriWorktrees",
+    "name": "Niri Worktrees",
+    "description": "Shows the git worktree and pull request status for the focused Niri workspace",
+    "version": "0.1.0",
+    "author": "Tim Macfarlane",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./NiriWorktreesWidget.qml",
+    "icon": "account_tree",
+    "settings": "./NiriWorktreesSettings.qml",
+    "dependencies": ["niri-worktrees"],
+    "permissions": ["settings_read", "settings_write"]
+}

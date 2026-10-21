@@ -2,7 +2,10 @@ use crate::cli;
 use crate::errors::{message, AppError, CommandError, Result};
 use crate::git;
 use crate::github;
-use crate::models::{BranchRow, GitWorktree, PullRequestRow, Repo, WorktreeMapping, WorktreeRow};
+use crate::models::{
+    BranchRow, GitWorktree, PullRequestRow, PullRequestStatus, Repo, WorktreeMapping, WorktreeRow,
+    WorktreeStatusRow,
+};
 use crate::niri::{self, NiriClient, SocketNiriClient};
 use crate::output;
 use crate::paths::normalize_path;
@@ -56,6 +59,7 @@ pub fn dispatch(command: cli::Command, env: &dyn Env) -> Result<()> {
         cli::Command::SetWorkspace(args) => cmd_set_workspace(args, env),
         cli::Command::UnsetWorkspace(args) => cmd_unset_workspace(args, env),
         cli::Command::GetWorktree(args) => cmd_get_worktree(args, env),
+        cli::Command::WorktreeStatus(args) => cmd_worktree_status(args, env),
         cli::Command::FocusWorktree(args) => {
             focus_worktree(env, normalize_path(args.worktree))?;
             Ok(())
@@ -218,24 +222,91 @@ fn cmd_unset_workspace(args: cli::UnsetWorkspace, env: &dyn Env) -> Result<()> {
 }
 
 fn cmd_get_worktree(args: cli::GetWorktree, env: &dyn Env) -> Result<()> {
-    let workspace_id = if let Some(id) = args.workspace_id {
-        id
-    } else {
-        niri::focused_workspace(env.niri())?
-            .get("id")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| AppError::Message("Focused Niri workspace does not have an id".to_string()))?
-    };
-    let Some(mapping) = env
-        .store()
-        .load_worktrees()?
-        .into_iter()
-        .find(|entry| entry.workspace_id == workspace_id && entry.path.is_dir())
-    else {
+    let workspace_id = workspace_id_or_focused(env, args.workspace_id)?;
+    let Some(mapping) = mapping_for_workspace(env.store(), workspace_id)? else {
         return message(format!("No worktree is stored for workspace {workspace_id}"));
     };
     println!("{}", mapping.path.display());
     Ok(())
+}
+
+fn cmd_worktree_status(args: cli::WorktreeStatus, env: &dyn Env) -> Result<()> {
+    let workspace_id = workspace_id_or_focused(env, args.workspace_id)?;
+    let row = worktree_status(env, workspace_id, !args.no_pull_request)?;
+    if args.json {
+        output::print_json("worktree", row)
+    } else {
+        if let Some(row) = row {
+            output::print_worktree_status(&row);
+        }
+        Ok(())
+    }
+}
+
+fn worktree_status(
+    env: &dyn Env,
+    workspace_id: u64,
+    include_pull_request: bool,
+) -> Result<Option<WorktreeStatusRow>> {
+    let Some(mapping) = mapping_for_workspace(env.store(), workspace_id)? else {
+        return Ok(None);
+    };
+    let repo = stored_repo_for_worktree(env, &mapping.path)?;
+    let pull_request = match &repo {
+        Some(repo) if include_pull_request && repo.list_pull_requests => {
+            let workspace_ids = workspace_ids_by_worktree(env.store())?;
+            pull_requests_for_repo(env.runner(), repo, &workspace_ids)?
+                .into_iter()
+                .find(|row| row.worktree.as_deref() == Some(mapping.path.as_path()))
+                .map(|row| PullRequestStatus {
+                    pr_number: row.pr_number,
+                    status: row.status,
+                    unresolved_review_comments: row.unresolved_review_comments,
+                    total_review_comments: row.total_review_comments,
+                    checks_status: row.checks_status,
+                })
+        }
+        _ => None,
+    };
+    let default_branch = git::default_origin_branch(env.runner(), &mapping.path).ok();
+    let commits_ahead_of_default_branch = default_branch
+        .as_deref()
+        .and_then(|base| git::commits_ahead(env.runner(), &mapping.path, base));
+    let is_dirty = git::status_porcelain(env.runner(), &mapping.path)
+        .ok()
+        .map(|status| !status.is_empty());
+    Ok(Some(WorktreeStatusRow {
+        name: mapping
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| mapping.path.display().to_string()),
+        local_branch: git::current_branch(env.runner(), &mapping.path),
+        default_branch,
+        commits_ahead_of_default_branch,
+        is_dirty,
+        repo: repo.map(|repo| repo.path),
+        workspace_id,
+        pull_request,
+        path: mapping.path,
+    }))
+}
+
+fn workspace_id_or_focused(env: &dyn Env, workspace_id: Option<u64>) -> Result<u64> {
+    if let Some(id) = workspace_id {
+        return Ok(id);
+    }
+    niri::focused_workspace(env.niri())?
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| AppError::Message("Focused Niri workspace does not have an id".to_string()))
+}
+
+fn mapping_for_workspace(store: &dyn Store, workspace_id: u64) -> Result<Option<WorktreeMapping>> {
+    Ok(store
+        .load_worktrees()?
+        .into_iter()
+        .find(|entry| entry.workspace_id == workspace_id && entry.path.is_dir()))
 }
 
 fn cmd_create_worktree(args: cli::CreateWorktree, env: &dyn Env) -> Result<()> {

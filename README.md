@@ -33,6 +33,37 @@ mise run install-vicinae-extension
 The build installs the extension into Vicinae's user extension directory. If the
 Niri Worktrees commands do not appear immediately, restart Vicinae.
 
+## Install the DankMaterialShell bar widget
+
+The widget shows the worktree on the focused Niri workspace, how many commits
+it is ahead of `origin/main` (or the origin default branch), whether it has
+uncommitted changes, and, when the branch has a pull request, its number,
+state, checks, and unresolved review threads. It is hidden on workspaces without a worktree.
+
+```sh
+mise run install-dms-plugin
+dms ipc plugin-scan scan
+```
+
+Then enable **Niri Worktrees** in DMS Settings > Plugins and add it to a bar
+section. Pull requests are only looked up for repositories with
+`--list-pull-requests true`. Click the widget to open the pull request in the
+browser; right-click to refresh.
+
+DMS usually runs without your shell's `PATH`, so the widget adds
+`~/.local/bin:~/.local/share/mise/shims` when running `niri-worktrees` and
+`gh`. Change "Extra PATH directories" in the plugin settings if they live
+elsewhere.
+
+The widget runs `niri-worktrees worktree-status --json`, which can also be used
+directly:
+
+```sh
+niri-worktrees worktree-status                  # focused workspace
+niri-worktrees worktree-status --workspace-id 3 --json
+niri-worktrees worktree-status --no-pull-request
+```
+
 ## Test
 
 ```sh

@@ -191,11 +191,29 @@ case "$args" in
     echo "$args" > "$GIT_MOCK_LOG"
     exit 0
     ;;
+  *"symbolic-ref --short -q HEAD"*) echo "feature"; exit 0 ;;
   *"rev-parse --abbrev-ref --symbolic-full-name @{u}"*) exit 1 ;;
-  *"status --porcelain"*) exit 0 ;;
+  *"rev-list --count origin/main..HEAD"*) echo "${GIT_MOCK_AHEAD:-0}"; exit 0 ;;
+  *"status --porcelain"*)
+    if [ "$GIT_MOCK_DIRTY" = "1" ]; then echo " M src/lib.rs"; fi
+    exit 0
+    ;;
   *"worktree remove"*) exit 0 ;;
 esac
 exit 0
+"#
+}
+
+fn gh_mock() -> &'static str {
+    r#"#!/bin/sh
+if [ "$GH_MOCK_FAIL" = "1" ]; then echo "gh failed" >&2; exit 1; fi
+cat <<'JSON'
+{"data": {"repository": {"pullRequests": {"nodes": [
+  {"number": 42, "headRefName": "feature", "state": "OPEN", "isCrossRepository": false,
+   "reviewThreads": {"nodes": [{"isResolved": false}, {"isResolved": true}]},
+   "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}
+]}}}}
+JSON
 "#
 }
 
@@ -636,6 +654,121 @@ fn get_worktree_fails_when_workspace_has_no_worktree() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("No worktree is stored for workspace 99"));
+}
+
+#[test]
+fn worktree_status_prints_null_when_workspace_has_no_worktree() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+
+    env.cmd()
+        .args(["worktree-status", "--json", "--workspace-id", "99"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"worktree\": null"));
+}
+
+#[test]
+fn worktree_status_includes_pull_request_for_worktree() {
+    let env = TestEnv::new();
+    env.write_stores_with_repo(json!({"path": env.repo_path(), "list_pull_requests": true}));
+    env.write_exe("git", git_mock());
+    env.write_exe("gh", gh_mock());
+
+    let output = env
+        .cmd()
+        .env("GIT_MOCK_AHEAD", "3")
+        .env("GIT_MOCK_DIRTY", "1")
+        .args(["worktree-status", "--json", "--workspace-id", "2"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        json!({"worktree": {
+            "path": env.worktree_path(),
+            "name": "feature",
+            "repo": env.repo_path(),
+            "local_branch": "feature",
+            "default_branch": "origin/main",
+            "commits_ahead_of_default_branch": 3,
+            "is_dirty": true,
+            "workspace_id": 2,
+            "pull_request": {
+                "pr_number": 42,
+                "status": "OPEN",
+                "unresolved_review_comments": 1,
+                "total_review_comments": 2,
+                "checks_status": "SUCCESS"
+            }
+        }})
+    );
+}
+
+#[test]
+fn worktree_status_prints_text_summary() {
+    let env = TestEnv::new();
+    env.write_stores_with_repo(json!({"path": env.repo_path(), "list_pull_requests": true}));
+    env.write_exe("git", git_mock());
+    env.write_exe("gh", gh_mock());
+
+    env.cmd()
+        .env("GIT_MOCK_AHEAD", "3")
+        .env("GIT_MOCK_DIRTY", "1")
+        .args(["worktree-status", "--workspace-id", "2"])
+        .assert()
+        .success()
+        .stdout("feature 3 ahead dirty #42 OPEN SUCCESS 1 unresolved\n");
+}
+
+#[test]
+fn worktree_status_skips_pull_request_when_requested() {
+    let env = TestEnv::new();
+    env.write_stores_with_repo(json!({"path": env.repo_path(), "list_pull_requests": true}));
+    env.write_exe("git", git_mock());
+    env.write_exe("gh", gh_mock());
+
+    env.cmd()
+        .env("GH_MOCK_FAIL", "1")
+        .args(["worktree-status", "--json", "--no-pull-request", "--workspace-id", "2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"feature\""))
+        .stdout(predicate::str::contains("\"commits_ahead_of_default_branch\": 0"))
+        .stdout(predicate::str::contains("\"is_dirty\": false"))
+        .stdout(predicate::str::contains("\"pull_request\": null"));
+}
+
+#[test]
+fn worktree_status_skips_pull_request_when_repo_does_not_list_them() {
+    let env = TestEnv::new();
+    env.write_stores();
+    env.write_exe("git", git_mock());
+    env.write_exe("gh", gh_mock());
+
+    env.cmd()
+        .env("GH_MOCK_FAIL", "1")
+        .args(["worktree-status", "--json", "--workspace-id", "2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"pull_request\": null"));
+}
+
+#[test]
+fn worktree_status_fails_when_pull_request_lookup_fails() {
+    let env = TestEnv::new();
+    env.write_stores_with_repo(json!({"path": env.repo_path(), "list_pull_requests": true}));
+    env.write_exe("git", git_mock());
+    env.write_exe("gh", gh_mock());
+
+    env.cmd()
+        .env("GH_MOCK_FAIL", "1")
+        .args(["worktree-status", "--json", "--workspace-id", "2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("gh failed"));
 }
 
 #[test]
